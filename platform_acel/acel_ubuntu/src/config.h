@@ -105,15 +105,31 @@
 #define WEB_SERVER_PORT  80
 
 // ---- Formato binario del archivo --------------------------
-// Header  (8  bytes): MAGIC(4) + VERSION(2) + SAMPLE_RATE(2)
+// Header  (16 bytes): MAGIC(4) + VERSION(2) + SAMPLE_RATE(2) + lat(4) + lon(4)
 // Muestra (10 bytes): timestamp_ms(4) + ax_bp(2) + ay_bp(2) + az_bp(2)
 //   ax_bp / ay_bp / az_bp = señal con filtro paso-banda aplicado (LSB)
-// Tamaño por minuto: 8 + 12000×10 = 120008 bytes ≈ 117 KB
+// Tamaño por minuto: 16 + 12000×10 = 120016 bytes ≈ 117 KB
 #define BIN_MAGIC        0xDA7A1345UL
-#define BIN_VERSION      0x0002         // v2 — todos los ejes filtrados con BP
+#define BIN_VERSION      0x0003         // v3 — agrega lat/lon GPS al header
 
 // ---- Buffer de escritura SD --------------------------------
 #define WRITE_FLUSH_EVERY 200  // flush SD cada N muestras (~1 s a 200 Hz)
+
+// ---- GPS Neo 6M -------------------------------------------
+#define GPS_RX_PIN       16           // GPIO16 ← TX del Neo 6M
+#define GPS_TX_PIN       17           // GPIO17 → RX del Neo 6M
+#define GPS_BAUD         9600
+#define GPS_TIMEOUT_MS   5000         // sin fix en 5 s → lat=0.0, lon=0.0
+
+// ---- Inferencia TFLite Micro ------------------------------
+#define SEISMIC_WIN_SAMPLES  800      // 4.0 s × 200 Hz
+#define SEISMIC_TIME_BINS    11       // 1 + (800-128)/64  (fórmula scipy)
+#define SEISMIC_FREQ_BINS    65       // nperseg/2 + 1
+#define TENSOR_ARENA_SIZE    (48 * 1024)
+
+// ---- Rutas SD (logger dual) --------------------------------
+#define SD_DIR_ACEL      "/Aceleraciones"
+#define SD_DIR_EVENTOS   "/Eventos"
 
 
 

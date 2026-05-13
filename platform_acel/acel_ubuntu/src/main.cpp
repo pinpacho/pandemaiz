@@ -50,6 +50,53 @@
 #include <time.h>
 #include "config.h"
 
+// ── GPS ──────────────────────────────────────────────────────
+#include <TinyGPSPlus.h>
+// ── TFLite Micro ─────────────────────────────────────────────
+#include "model.h"
+#include "norm_constants.h"
+#include "tensorflow/lite/micro/micro_interpreter.h"
+#include "tensorflow/lite/micro/micro_error_reporter.h"
+#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
+#include "tensorflow/lite/schema/schema_generated.h"
+
+// ── FFT radix-2 de 128 puntos (Cooley-Tukey, implementación propia) ──────────
+// Evita dependencia externa de esp-dsp. Suficiente para PSD de ventanas de 128.
+static void fft128(float* data) {
+    constexpr int N = 128;
+    // Bit-reversal permutation
+    for (int i = 1, j = 0; i < N; i++) {
+        int bit = N >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) {
+            float tr = data[2*i]; data[2*i] = data[2*j]; data[2*j] = tr;
+            float ti = data[2*i+1]; data[2*i+1] = data[2*j+1]; data[2*j+1] = ti;
+        }
+    }
+    // Butterfly stages
+    for (int len = 2; len <= N; len <<= 1) {
+        float ang = -2.0f * (float)M_PI / len;
+        float wRe = cosf(ang), wIm = sinf(ang);
+        for (int i = 0; i < N; i += len) {
+            float re = 1.0f, im = 0.0f;
+            for (int j = 0; j < len / 2; j++) {
+                int u = i + j, v = i + j + len / 2;
+                float uRe = data[2*u],   uIm = data[2*u+1];
+                float vRe = data[2*v]*re - data[2*v+1]*im;
+                float vIm = data[2*v]*im + data[2*v+1]*re;
+                data[2*u]   = uRe + vRe;  data[2*u+1] = uIm + vIm;
+                data[2*v]   = uRe - vRe;  data[2*v+1] = uIm - vIm;
+                float nRe = re*wRe - im*wIm;
+                im = re*wIm + im*wRe;
+                re = nRe;
+            }
+        }
+    }
+}
+
+
+
 #include <U8g2lib.h>   // OLED — instalar "U8g2" de olikraus en Library Manager
 
 // OLED SSD1306 128×64 — modo I2C sin reiniciar el bus
@@ -87,11 +134,13 @@ constexpr uint8_t FULL_RES_2G = 0x08;   // DATA_FORMAT: FULL_RES=1, Range=±2g
 //  ESTRUCTURAS DE DATOS
 // ============================================================
 
-// Cabecera del archivo binario (8 bytes, sin cambios de layout)
+// Cabecera del archivo binario (16 bytes, v3: agrega lat/lon GPS)
 struct __attribute__((packed)) FileHeader {
     uint32_t magic;        // BIN_MAGIC
-    uint16_t version;      // BIN_VERSION (ahora 0x0002)
+    uint16_t version;      // BIN_VERSION (0x0003)
     uint16_t sample_rate;  // Hz
+    float    lat;          // GPS latitud  (0.0 si sin fix)
+    float    lon;          // GPS longitud (0.0 si sin fix)
 };
 
 // Una muestra (10 bytes, layout idéntico a v1 para compatibilidad)
@@ -222,6 +271,31 @@ AsyncWebServer g_server(WEB_SERVER_PORT);
 // --- Estadísticas en tiempo real ----------------------------
 volatile uint32_t g_totalSamples = 0;
 volatile uint32_t g_dropCount    = 0;
+
+// --- GPS Neo 6M ---------------------------------------------
+static TinyGPSPlus g_gps;
+static float       g_gps_lat   = 0.0f;
+static float       g_gps_lon   = 0.0f;
+static bool        g_gps_valid = false;
+
+// --- Ventana de inferencia (800 muestras × 3 ejes = 4.8 KB) -
+static int16_t  g_win_ax[SEISMIC_WIN_SAMPLES];
+static int16_t  g_win_ay[SEISMIC_WIN_SAMPLES];
+static int16_t  g_win_az[SEISMIC_WIN_SAMPLES];
+static uint32_t g_win_ptr = 0;
+
+// --- TFLite Micro (buffers estáticos — sin fragmentación heap)
+// tensor_arena=60KB, g_spec=8.6KB, g_fft_buf=1KB, g_hann128=0.5KB
+// Total adicional ~74.8 KB / 520 KB SRAM disponibles
+static uint8_t   g_tensor_arena[TENSOR_ARENA_SIZE];
+static float     g_spec[SEISMIC_FREQ_BINS][SEISMIC_TIME_BINS][3];
+static float     g_fft_buf[256];
+static float     g_hann128[128];
+static tflite::MicroErrorReporter                 g_tflite_error_reporter;
+// Solo los ops que usa el 1D-CNN: Conv2D, MaxPool, Reshape, Transpose,
+// Mean (GlobalAvgPool), FullyConnected, Logistic, Relu
+static tflite::MicroMutableOpResolver<8>          g_tflite_resolver;
+static tflite::MicroInterpreter*                  g_tflite_interp = nullptr;
 
 // ============================================================
 //  ADXL345 — Funciones de bajo nivel I2C
@@ -377,6 +451,142 @@ void IRAM_ATTR onTimerISR() {
 }
 
 // ============================================================
+//  GPS Neo 6M
+// ============================================================
+
+static void ensure_sd_dirs() {
+    if (!SD.exists(SD_DIR_ACEL))    SD.mkdir(SD_DIR_ACEL);
+    if (!SD.exists(SD_DIR_EVENTOS)) SD.mkdir(SD_DIR_EVENTOS);
+}
+
+static bool gps_init() {
+    Serial2.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+    Serial.printf("[GPS] Buscando fix (timeout %d s)...\n", GPS_TIMEOUT_MS / 1000);
+    uint32_t deadline = millis() + GPS_TIMEOUT_MS;
+    while (millis() < deadline) {
+        while (Serial2.available()) g_gps.encode(Serial2.read());
+        if (g_gps.location.isValid()) {
+            g_gps_lat   = (float)g_gps.location.lat();
+            g_gps_lon   = (float)g_gps.location.lng();
+            g_gps_valid = true;
+            Serial.printf("[GPS] Fix: lat=%.6f  lon=%.6f\n", g_gps_lat, g_gps_lon);
+            return true;
+        }
+        delay(10);
+    }
+    Serial.println("[GPS] Sin fix — coordenadas: 0.0, 0.0");
+    return false;
+}
+
+static void gps_update() {
+    while (Serial2.available()) g_gps.encode(Serial2.read());
+    if (g_gps.location.isValid() && g_gps.location.isUpdated()) {
+        g_gps_lat   = (float)g_gps.location.lat();
+        g_gps_lon   = (float)g_gps.location.lng();
+        g_gps_valid = true;
+    }
+}
+
+// ============================================================
+//  TFLite Micro — Inferencia sísmica
+// ============================================================
+
+static void seismic_inference_init() {
+    for (int n = 0; n < 128; n++)
+        g_hann128[n] = 0.5f * (1.0f - cosf(2.0f * M_PI * n / 127.0f));
+
+    // Registrar solo los ops del 1D-CNN (Conv1D se mapea a CONV_2D en TFLite)
+    g_tflite_resolver.AddConv2D();
+    g_tflite_resolver.AddMaxPool2D();
+    g_tflite_resolver.AddReshape();
+    g_tflite_resolver.AddTranspose();
+    g_tflite_resolver.AddMean();
+    g_tflite_resolver.AddFullyConnected();
+    g_tflite_resolver.AddLogistic();
+    g_tflite_resolver.AddRelu();
+
+    const tflite::Model* mdl = tflite::GetModel(seismic_model_data);
+    tflite::MicroAllocator* allocator = tflite::MicroAllocator::Create(
+        g_tensor_arena, TENSOR_ARENA_SIZE, &g_tflite_error_reporter);
+    static tflite::MicroInterpreter static_interp(
+        mdl, g_tflite_resolver, allocator, &g_tflite_error_reporter);
+    g_tflite_interp = &static_interp;
+
+    TfLiteStatus st = g_tflite_interp->AllocateTensors();
+    Serial.printf("[TFLite] AllocateTensors: %s  (arena=%d KB)\n",
+                  st == kTfLiteOk ? "OK" : "FALLO", TENSOR_ARENA_SIZE / 1024);
+}
+
+// STFT de un eje: llena g_spec[freq][time][ch] con log10(PSD)
+static void _spec_axis(const int16_t* buf, int ch) {
+    constexpr float LSB_G = 1.0f / 256.0f;           // 256 LSB/g, ±2g full-res
+    constexpr float NORM  = SEISMIC_FS * SEISMIC_HANN_POWER;
+
+    for (int t = 0; t < SEISMIC_TIME_BINS; t++) {
+        int start = t * 64;                            // hop = 64 muestras
+        for (int n = 0; n < 128; n++) {
+            g_fft_buf[2*n]   = buf[start + n] * LSB_G * g_hann128[n];
+            g_fft_buf[2*n+1] = 0.0f;
+        }
+        fft128(g_fft_buf);
+        for (int k = 0; k < SEISMIC_FREQ_BINS; k++) {
+            float psd = g_fft_buf[2*k]*g_fft_buf[2*k]
+                      + g_fft_buf[2*k+1]*g_fft_buf[2*k+1];
+            if (k > 0 && k < 64) psd *= 2.0f;         // espectro one-sided
+            g_spec[k][t][ch] = log10f(psd / NORM + 1e-12f);
+        }
+    }
+}
+
+// Devuelve score CNN: 0.0 = ruido, 1.0 = sismo
+static float run_inference() {
+    if (!g_tflite_interp) return 0.0f;
+
+    _spec_axis(g_win_ax, 0);   // canal 0: EW  (ax)
+    _spec_axis(g_win_az, 1);   // canal 1: VER (az)
+    _spec_axis(g_win_ay, 2);   // canal 2: NS  (ay)
+
+    float* inp = g_tflite_interp->input(0)->data.f;
+    int idx = 0;
+    for (int f = 0; f < SEISMIC_FREQ_BINS; f++)
+        for (int t = 0; t < SEISMIC_TIME_BINS; t++)
+            for (int c = 0; c < 3; c++)
+                inp[idx++] = (g_spec[f][t][c] - SEISMIC_NORM_MEAN) / SEISMIC_NORM_STD;
+
+    g_tflite_interp->Invoke();
+    return g_tflite_interp->output(0)->data.f[0];
+}
+
+static void saveEventFile(float score) {
+    char path[72];
+    time_t now; time(&now); struct tm tm;
+    localtime_r(&now, &tm);
+    snprintf(path, sizeof(path),
+             SD_DIR_EVENTOS "/evento_%04d%02d%02d_%02d%02d%02d_s%02d.bin",
+             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec,
+             (int)(score * 100));
+
+    File ef = SD.open(path, FILE_WRITE);
+    if (!ef) { Serial.println("[EVENTO] Error abriendo archivo de evento"); return; }
+
+    FileHeader hdr = {BIN_MAGIC, BIN_VERSION, SAMPLE_RATE_HZ, g_gps_lat, g_gps_lon};
+    ef.write((uint8_t*)&hdr, sizeof(hdr));
+
+    for (uint32_t i = 0; i < SEISMIC_WIN_SAMPLES; i++) {
+        Sample s;
+        s.timestamp_ms = millis() - (uint32_t)(SEISMIC_WIN_SAMPLES - i) * 5;
+        s.ax           = g_win_ax[i];
+        s.ay           = g_win_ay[i];
+        s.az_dynamic   = g_win_az[i];
+        ef.write((uint8_t*)&s, sizeof(s));
+    }
+    ef.flush(); ef.close();
+    Serial.printf("[SISMO] Evento → %s  score=%.3f  GPS=%.5f,%.5f\n",
+                  path, score, g_gps_lat, g_gps_lon);
+}
+
+// ============================================================
 //  GESTIÓN DE ARCHIVOS SD
 // ============================================================
 
@@ -385,7 +595,7 @@ static void buildFileName(char *buf, size_t len) {
     struct tm ti;
     time(&now);
     localtime_r(&now, &ti);
-    snprintf(buf, len, "/accel_%04d%02d%02d_%02d%02d%02d.bin",
+    snprintf(buf, len, SD_DIR_ACEL "/accel_%04d%02d%02d_%02d%02d%02d.bin",
              ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday,
              ti.tm_hour, ti.tm_min, ti.tm_sec);
 }
@@ -404,7 +614,7 @@ static bool openNewFile() {
         return false;
     }
 
-    FileHeader hdr = { BIN_MAGIC, BIN_VERSION, (uint16_t)SAMPLE_RATE_HZ };
+    FileHeader hdr = { BIN_MAGIC, BIN_VERSION, (uint16_t)SAMPLE_RATE_HZ, g_gps_lat, g_gps_lon };
     g_dataFile.write((uint8_t*)&hdr, sizeof(hdr));
     g_sampleCount = 0;
 
@@ -905,6 +1115,15 @@ Serial.println("[OLED] ✓ Pantalla inicializada");
     uint64_t cardMB = SD.cardSize() / (1024ULL * 1024ULL);
     Serial.printf("[SD]  ✓ Tarjeta: %llu MB (tipo: %d)\n", cardMB, SD.cardType());
 
+    // ── Crear directorios SD ──────────────────────────────
+    ensure_sd_dirs();
+
+    // ── GPS Neo 6M (5 s timeout → 0.0, 0.0 si sin fix) ──
+    gps_init();
+
+    // ── TFLite Micro — cargar modelo + Hanning + FFT ─────
+    seismic_inference_init();
+
     // ── WiFi y NTP ────────────────────────────────────────
     connectWiFiEnterprise();
 
@@ -979,7 +1198,24 @@ void loop() {
     };
     writeSample(s);
 
-    // ── 5. Diagnóstico serial cada 5 segundos ─────────────
+    // ── 5. Acumular ventana e inferencia CNN cada 4 s ─────
+    g_win_ax[g_win_ptr] = ax_f;
+    g_win_ay[g_win_ptr] = ay_f;
+    g_win_az[g_win_ptr] = az_f;
+    if (++g_win_ptr >= SEISMIC_WIN_SAMPLES) {
+        g_win_ptr = 0;
+        float score = run_inference();        // ~80–120 ms cada 4 s
+        Serial.printf("[CNN] score=%.3f  %s\n",
+                      score, score > SEISMIC_THRESHOLD ? "SISMO" : "ruido");
+        if (score > SEISMIC_THRESHOLD) {
+            saveEventFile(score);
+        }
+    }
+
+    // ── Actualizar GPS (no bloqueante) ────────────────────
+    gps_update();
+
+    // ── 6. Diagnóstico serial cada 5 segundos ─────────────
     static uint32_t lastPrint = 0;
     if (millis() - lastPrint > 5000) {
         lastPrint = millis();
