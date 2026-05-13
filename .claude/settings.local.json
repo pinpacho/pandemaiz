@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv --version)",
+      "Bash(uv venv *)",
+      "Bash(uv pip *)",
+      "Bash(pan_env/bin/python -m ipykernel install --user --name pandemaiz --display-name \"PANdeMaiz\")",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -)"
+    ]
+  }
+}

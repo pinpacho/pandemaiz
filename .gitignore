@@ -1,0 +1,56 @@
+# ── Entorno virtual ──────────────────────────────────────────
+pan_env/
+.venv/
+venv/
+env/
+
+# ── Python ───────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.so
+
+# ── Jupyter ──────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ── Dataset (archivos grandes — no versionar) ─────────────────
+Data_Labeling/Dataset/0_Ruido/*.npy
+Data_Labeling/Dataset/1_Sismo/*.npy
+Data_Labeling/DatosObtenidos/
+
+# ── Datos binarios del sensor ─────────────────────────────────
+*.bin
+
+# ── PlatformIO ───────────────────────────────────────────────
+platform_acel/**/.pio/
+platform_acel/**/.vscode/
+*.elf
+*.hex
+*.map
+
+# ── Credenciales y configuración sensible ────────────────────
+.env
+.env.*
+config.local.h
+secrets.h
+serviceAccountKey.json
+firebase-adminsdk*.json
+google-credentials*.json
+
+# ── IDEs ─────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Sistema ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.log

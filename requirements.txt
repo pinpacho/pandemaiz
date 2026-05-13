@@ -1,0 +1,26 @@
+# ── Procesamiento de señal sísmica ──────────────────────────
+numpy>=1.24
+scipy>=1.11
+obspy>=1.4
+tqdm>=4.66
+
+# ── Visualización ────────────────────────────────────────────
+matplotlib>=3.8
+
+# ── Jupyter ──────────────────────────────────────────────────
+jupyterlab>=4.0
+ipykernel>=6.0
+
+# ── Machine Learning ─────────────────────────────────────────
+tensorflow-cpu>=2.15
+scikit-learn>=1.4
+
+# ── Backend IoT (FastAPI + Firebase) ─────────────────────────
+fastapi>=0.111
+uvicorn[standard]>=0.29
+firebase-admin>=6.5
+python-dotenv>=1.0
+httpx>=0.27
+
+# ── Calidad de código ────────────────────────────────────────
+pytest>=8.0
