@@ -86,9 +86,9 @@ ADXL345 → burst 6 bytes → ax/ay/az (int16)
 
 ```
 Ventana temporal: 4 s (configurable)
-Shape: (65, 12, 3) float32
+Shape: (65, 11, 3) float32
   65  = bins de frecuencia (0–100 Hz)
-  12  = bins de tiempo  [= ceil((WIN_SAMPLES - NOVERLAP) / (NPERSEG - NOVERLAP))]
+  11  = bins de tiempo  [= 1 + (WIN_SAMPLES - NPERSEG) // (NPERSEG - NOVERLAP)]
   3   = canales (EW, VER, NS)
 Escala: log10(PSD + 1e-12)
 ```
