@@ -14,8 +14,8 @@
 #define WIFI_USERNAME   ""
 #define WIFI_PASSWORD   ""*/
 
-#define WIFI_SSID ""
-#define WIFI_PASS ""
+#define WIFI_SSID "REMOVED"
+#define WIFI_PASS "REMOVED"
 
 // ---- NTP / Zona horaria ------------------------------------
 // Colombia = UTC-5 (sin horario de verano)
@@ -130,6 +130,37 @@
 // ---- Rutas SD (logger dual) --------------------------------
 #define SD_DIR_ACEL      "/Aceleraciones"
 #define SD_DIR_EVENTOS   "/Eventos"
+
+// ---- Identificación de estación ----------------------------
+// Valor real proviene de .env vía load_env.py.
+// Fallback: genera "PAN_XXYYZZ" desde los últimos 3 bytes MAC.
+#ifndef STATION_NAME
+#define STATION_NAME        ""
+#endif
+
+// ---- Firebase ----------------------------------------------
+// Valores reales en .env (nunca commitear credenciales aquí).
+#ifndef FIREBASE_PROJECT_ID
+#define FIREBASE_PROJECT_ID "YOUR_PROJECT_ID"
+#endif
+#ifndef FIREBASE_API_KEY
+#define FIREBASE_API_KEY    "YOUR_WEB_API_KEY"
+#endif
+#ifndef FIREBASE_USER_EMAIL
+#define FIREBASE_USER_EMAIL "device@pandemaiz.com"
+#endif
+#ifndef FIREBASE_USER_PASS
+#define FIREBASE_USER_PASS  "YOUR_DEVICE_PASSWORD"
+#endif
+#ifndef STORAGE_BUCKET_ID
+#define STORAGE_BUCKET_ID   "YOUR_PROJECT_ID.appspot.com"
+#endif
+#ifndef RTDB_URL
+#define RTDB_URL            "https://YOUR_PROJECT_ID-default-rtdb.firebaseio.com/"
+#endif
+
+// ---- Cola de uploads ---------------------------------------
+#define UPLOAD_QUEUE_SIZE   8           // archivos pendientes máx.
 
 
 

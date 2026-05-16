@@ -99,6 +99,11 @@ static void fft128(float* data) {
 
 #include <U8g2lib.h>   // OLED — instalar "U8g2" de olikraus en Library Manager
 
+// ── Firebase & Firestore (Fase 3) ────────────────────────────────────────────
+#include <Firebase_ESP_Client.h>
+#include <addons/TokenHelper.h>
+#include <esp_task_wdt.h>
+
 // OLED SSD1306 128×64 — modo I2C sin reiniciar el bus
 // U8G2_R0 = sin rotación. El último parámetro u8x8_byte_arduino_hw_i2c
 // usa la instancia Wire global que ya inicializamos nosotros.
@@ -262,7 +267,7 @@ float g_sw_bias[3] = { 0.0f, 0.0f, 0.0f };   // [0]=X, [1]=Y, [2]=Z
 // --- SD Card ------------------------------------------------
 SPIClass g_sdSPI(VSPI);
 File     g_dataFile;
-char     g_currentFile[48];
+char     g_currentFile[80];
 uint32_t g_sampleCount = 0;
 
 // --- Web Server ---------------------------------------------
@@ -294,8 +299,28 @@ static float     g_hann128[128];
 static tflite::MicroErrorReporter                 g_tflite_error_reporter;
 // Solo los ops que usa el 1D-CNN: Conv2D, MaxPool, Reshape, Transpose,
 // Mean (GlobalAvgPool), FullyConnected, Logistic, Relu
-static tflite::MicroMutableOpResolver<8>          g_tflite_resolver;
+static tflite::MicroMutableOpResolver<11>         g_tflite_resolver;
 static tflite::MicroInterpreter*                  g_tflite_interp = nullptr;
+
+// ── Fase 3: Comunicación ─────────────────────────────────────────────────────
+struct UploadReq {
+    char   path[80];   // ruta SD completa, ej: /Aceleraciones/accel_....bin
+    bool   is_event;   // true → /Eventos/ + escribe en /alertas/ de RTDB
+    float  score;      // CNN score (válido solo si is_event)
+    float  lat, lon;
+    time_t ts;
+};
+
+static char              g_station_id[32];
+static FirebaseData      g_fbdo;
+static FirebaseAuth      g_fbAuth;
+static FirebaseConfig    g_fbConfig;
+static QueueHandle_t     g_upload_queue  = nullptr;
+static SemaphoreHandle_t g_sd_mutex      = nullptr;
+
+#define SD_LOCK()   xSemaphoreTake(g_sd_mutex, portMAX_DELAY)
+#define SD_UNLOCK() xSemaphoreGive(g_sd_mutex)
+
 
 // ============================================================
 //  ADXL345 — Funciones de bajo nivel I2C
@@ -459,6 +484,9 @@ static void ensure_sd_dirs() {
     if (!SD.exists(SD_DIR_EVENTOS)) SD.mkdir(SD_DIR_EVENTOS);
 }
 
+// Declaración adelantada — definición completa cerca de buildFileName()
+static bool ensureHourDir(const char* base, char* buf, size_t buf_size);
+
 static bool gps_init() {
     Serial2.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
     Serial.printf("[GPS] Buscando fix (timeout %d s)...\n", GPS_TIMEOUT_MS / 1000);
@@ -495,7 +523,7 @@ static void seismic_inference_init() {
     for (int n = 0; n < 128; n++)
         g_hann128[n] = 0.5f * (1.0f - cosf(2.0f * M_PI * n / 127.0f));
 
-    // Registrar solo los ops del 1D-CNN (Conv1D se mapea a CONV_2D en TFLite)
+    // Ops del 1D-CNN + cuantización
     g_tflite_resolver.AddConv2D();
     g_tflite_resolver.AddMaxPool2D();
     g_tflite_resolver.AddReshape();
@@ -504,6 +532,9 @@ static void seismic_inference_init() {
     g_tflite_resolver.AddFullyConnected();
     g_tflite_resolver.AddLogistic();
     g_tflite_resolver.AddRelu();
+    g_tflite_resolver.AddQuantize();
+    g_tflite_resolver.AddShape();
+    g_tflite_resolver.AddStridedSlice(); // indexación tensor[..., -1] / slicing
 
     const tflite::Model* mdl = tflite::GetModel(seismic_model_data);
     tflite::MicroAllocator* allocator = tflite::MicroAllocator::Create(
@@ -513,8 +544,12 @@ static void seismic_inference_init() {
     g_tflite_interp = &static_interp;
 
     TfLiteStatus st = g_tflite_interp->AllocateTensors();
+    if (st != kTfLiteOk) {
+        g_tflite_interp = nullptr;   // deshabilita inferencia — run_inference() devuelve 0
+    }
     Serial.printf("[TFLite] AllocateTensors: %s  (arena=%d KB)\n",
-                  st == kTfLiteOk ? "OK" : "FALLO", TENSOR_ARENA_SIZE / 1024);
+                  st == kTfLiteOk ? "OK" : "FALLO — inferencia deshabilitada",
+                  TENSOR_ARENA_SIZE / 1024);
 }
 
 // STFT de un eje: llena g_spec[freq][time][ch] con log10(PSD)
@@ -557,18 +592,173 @@ static float run_inference() {
     return g_tflite_interp->output(0)->data.f[0];
 }
 
+// ============================================================
+//  FASE 3: COMUNICACIÓN (station, Firebase, upload_task)
+// ============================================================
+
+static void station_init() {
+    if (strlen(STATION_NAME) > 0) {
+        strncpy(g_station_id, STATION_NAME, sizeof(g_station_id) - 1);
+    } else {
+        uint8_t mac[6];
+        WiFi.macAddress(mac);
+        snprintf(g_station_id, sizeof(g_station_id),
+                 "PAN_%02X%02X%02X", mac[3], mac[4], mac[5]);
+    }
+    Serial.printf("[Station] ID: %s\n", g_station_id);
+}
+
+static void firebase_init() {
+    g_fbConfig.api_key                   = FIREBASE_API_KEY;
+    g_fbConfig.database_url              = RTDB_URL;
+    g_fbAuth.user.email                  = FIREBASE_USER_EMAIL;
+    g_fbAuth.user.password               = FIREBASE_USER_PASS;
+    g_fbConfig.token_status_callback     = tokenStatusCallback;
+
+    Firebase.begin(&g_fbConfig, &g_fbAuth);
+    Firebase.reconnectNetwork(true);
+    // RX=4096 para recibir certificados TLS de Google (~3-4 KB por registro)
+    // TX=512 es suficiente para ClientHello mbedTLS (< 300 bytes)
+    g_fbdo.setBSSLBufferSize(4096, 512);
+    Serial.println("[Firebase] Inicializado");
+}
+
+// ── RTDB: alerta sísmica (JSON con IP y URL de descarga) ─────────────────────
+static void firebase_alert_rtdb(const UploadReq& req) {
+    struct tm ti; localtime_r(&req.ts, &ti);
+    char key[120];
+    snprintf(key, sizeof(key),
+             "/alertas/%s/%04d/%04d-%02d/%04d-%02d-%02d/%02d/%lld",
+             g_station_id,
+             ti.tm_year + 1900,
+             ti.tm_year + 1900, ti.tm_mon + 1,
+             ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday,
+             ti.tm_hour, (long long)req.ts);
+    char ip[20];
+    strncpy(ip, WiFi.localIP().toString().c_str(), sizeof(ip) - 1);
+    ip[sizeof(ip) - 1] = '\0';
+    char url[128];
+    snprintf(url, sizeof(url), "http://%s/download?f=%s", ip, req.path);
+    FirebaseJson j;
+    j.set("estacion",     g_station_id);
+    j.set("timestamp",    (int)req.ts);
+    j.set("lat",          req.lat);
+    j.set("lon",          req.lon);
+    j.set("score",        req.score);
+    j.set("ip",           ip);
+    j.set("url_descarga", url);
+    bool ok = Firebase.RTDB.setJSON(&g_fbdo, key, &j);
+    Serial.printf("[RTDB] Alerta %s: %s\n", key,
+                  ok ? "OK" : g_fbdo.errorReason().c_str());
+}
+
+static void rtdb_log_file(const UploadReq& req) {
+    char ip[20];
+    strncpy(ip, WiFi.localIP().toString().c_str(), sizeof(ip) - 1);
+    ip[sizeof(ip) - 1] = '\0';
+    char url[128];
+    snprintf(url, sizeof(url), "http://%s/download?f=%s", ip, req.path);
+
+    // Extraer nombre de archivo sin extensión como hoja del árbol RTDB
+    // req.path = "/Aceleraciones/2026/2026-05/2026-05-15/14/accel_20260515_140000.bin"
+    const char* slash = strrchr(req.path, '/');
+    char leaf[48];
+    strncpy(leaf, slash ? slash + 1 : req.path, sizeof(leaf) - 1);
+    leaf[sizeof(leaf) - 1] = '\0';
+    char* dot = strrchr(leaf, '.');
+    if (dot) *dot = '\0';   // quitar ".bin"
+
+    struct tm ti; localtime_r(&req.ts, &ti);
+    const char* col = req.is_event ? "logs_eventos" : "logs_acel";
+    char key[140];
+    snprintf(key, sizeof(key),
+             "/estaciones/%s/%s/%04d/%04d-%02d/%04d-%02d-%02d/%02d/%s",
+             g_station_id, col,
+             ti.tm_year + 1900,
+             ti.tm_year + 1900, ti.tm_mon + 1,
+             ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday,
+             ti.tm_hour, leaf);
+    FirebaseJson j;
+    j.set("archivo",   req.path);
+    j.set("url",       url);
+    j.set("lat",       req.lat);
+    j.set("lon",       req.lon);
+    j.set("timestamp", (int)req.ts);
+    if (req.is_event) j.set("score", req.score);
+    bool ok = Firebase.RTDB.setJSON(&g_fbdo, key, &j);
+    Serial.printf("[RTDB] %s: %s\n", key, ok ? "OK" : g_fbdo.errorReason().c_str());
+}
+
+// Task en Core 0: RTDB para alertas + metadatos de archivos.
+// Core 1 sigue muestreando a 200 Hz sin interferencia.
+static void upload_task(void* param) {
+    // Sacar IDLE0 del watchdog: RTDB/SSL puede bloquear Core 0 durante auth.
+    // Core 1 (200 Hz) sigue vigilado por IDLE1.
+    {
+        TaskHandle_t idle0 = xTaskGetIdleTaskHandleForCPU(0);
+        if (idle0) esp_task_wdt_delete(idle0);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    firebase_init();
+
+    while (!Firebase.ready()) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    // Reportar conexión con IP en RTDB
+    {
+        char ip[20];
+        strncpy(ip, WiFi.localIP().toString().c_str(), sizeof(ip) - 1);
+        ip[sizeof(ip) - 1] = '\0';
+        char key[80];
+        snprintf(key, sizeof(key), "/estaciones/%s/status", g_station_id);
+        FirebaseJson j;
+        j.set("estado",    "Conectada");
+        j.set("ip",        ip);
+        j.set("lat",       g_gps_lat);
+        j.set("lon",       g_gps_lon);
+        time_t now_t; time(&now_t);
+        j.set("timestamp", (int)now_t);
+        bool ok = Firebase.RTDB.setJSON(&g_fbdo, key, &j);
+        Serial.printf("[RTDB] Estacion Conectada — IP: %s: %s\n",
+                      ip, ok ? "OK" : g_fbdo.errorReason().c_str());
+    }
+
+    UploadReq req;
+    for (;;) {
+        if (!Firebase.ready()) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        if (xQueueReceive(g_upload_queue, &req, pdMS_TO_TICKS(200)) == pdTRUE) {
+            if (req.is_event) firebase_alert_rtdb(req);
+            rtdb_log_file(req);
+        }
+    }
+}
+
 static void saveEventFile(float score) {
-    char path[72];
+    // ensureHourDir toma SD_LOCK internamente; debe llamarse ANTES del SD_LOCK externo.
+    char day_dir[48];
+    ensureHourDir(SD_DIR_EVENTOS, day_dir, sizeof(day_dir));
     time_t now; time(&now); struct tm tm;
     localtime_r(&now, &tm);
+    char path[80];
     snprintf(path, sizeof(path),
-             SD_DIR_EVENTOS "/evento_%04d%02d%02d_%02d%02d%02d_s%02d.bin",
+             "%s/evento_%04d%02d%02d_%02d%02d%02d_s%02d.bin",
+             day_dir,
              tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
              tm.tm_hour, tm.tm_min, tm.tm_sec,
              (int)(score * 100));
 
+    SD_LOCK();
     File ef = SD.open(path, FILE_WRITE);
-    if (!ef) { Serial.println("[EVENTO] Error abriendo archivo de evento"); return; }
+    if (!ef) {
+        SD_UNLOCK();
+        Serial.println("[EVENTO] Error abriendo archivo de evento");
+        return;
+    }
 
     FileHeader hdr = {BIN_MAGIC, BIN_VERSION, SAMPLE_RATE_HZ, g_gps_lat, g_gps_lon};
     ef.write((uint8_t*)&hdr, sizeof(hdr));
@@ -582,6 +772,19 @@ static void saveEventFile(float score) {
         ef.write((uint8_t*)&s, sizeof(s));
     }
     ef.flush(); ef.close();
+    SD_UNLOCK();
+
+    if (g_upload_queue) {
+        UploadReq req;
+        strncpy(req.path, path, sizeof(req.path) - 1);
+        req.path[sizeof(req.path) - 1] = '\0';
+        req.is_event = true;
+        req.score    = score;
+        req.lat      = g_gps_lat;
+        req.lon      = g_gps_lon;
+        time(&req.ts);
+        xQueueSend(g_upload_queue, &req, 0);
+    }
     Serial.printf("[SISMO] Evento → %s  score=%.3f  GPS=%.5f,%.5f\n",
                   path, score, g_gps_lat, g_gps_lon);
 }
@@ -590,26 +793,68 @@ static void saveEventFile(float score) {
 //  GESTIÓN DE ARCHIVOS SD
 // ============================================================
 
+// Crea base/YYYY/YYYY-MM/YYYY-MM-DD/HH si no existe y escribe la ruta en buf.
+// Ejemplo: base="/Aceleraciones" → buf="/Aceleraciones/2026/2026-05/2026-05-15/14"
+// Debe llamarse ANTES de tomar SD_LOCK en el llamador (toma/libera el lock internamente).
+static bool ensureHourDir(const char* base, char* buf, size_t buf_size) {
+    time_t now; time(&now);
+    struct tm ti; localtime_r(&now, &ti);
+    char year_dir[32], month_dir[40], day_dir[48];
+    snprintf(year_dir,  sizeof(year_dir),  "%s/%04d",             base,      ti.tm_year + 1900);
+    snprintf(month_dir, sizeof(month_dir), "%s/%04d-%02d",        year_dir,  ti.tm_year + 1900, ti.tm_mon + 1);
+    snprintf(day_dir,   sizeof(day_dir),   "%s/%04d-%02d-%02d",   month_dir, ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday);
+    snprintf(buf,       buf_size,          "%s/%02d",              day_dir,   ti.tm_hour);
+    SD_LOCK();
+    if (!SD.exists(year_dir))  SD.mkdir(year_dir);
+    if (!SD.exists(month_dir)) SD.mkdir(month_dir);
+    if (!SD.exists(day_dir))   SD.mkdir(day_dir);
+    bool ok = SD.exists(buf) || SD.mkdir(buf);
+    SD_UNLOCK();
+    return ok;
+}
+
 static void buildFileName(char *buf, size_t len) {
+    char day_dir[48];
+    ensureHourDir(SD_DIR_ACEL, day_dir, sizeof(day_dir));
     time_t    now;
     struct tm ti;
     time(&now);
     localtime_r(&now, &ti);
-    snprintf(buf, len, SD_DIR_ACEL "/accel_%04d%02d%02d_%02d%02d%02d.bin",
+    snprintf(buf, len, "%s/accel_%04d%02d%02d_%02d%02d%02d.bin",
+             day_dir,
              ti.tm_year + 1900, ti.tm_mon + 1, ti.tm_mday,
              ti.tm_hour, ti.tm_min, ti.tm_sec);
 }
 
 static bool openNewFile() {
+    // buildFileName llama a ensureHourDir que toma SD_LOCK internamente.
+    // Debe ejecutarse ANTES del SD_LOCK externo para evitar mutex anidado.
+    char newFile[80];
+    buildFileName(newFile, sizeof(newFile));
+
+    SD_LOCK();
     if (g_dataFile) {
+        if (g_upload_queue) {
+            UploadReq req;
+            strncpy(req.path, g_currentFile, sizeof(req.path) - 1);
+            req.path[sizeof(req.path) - 1] = '\0';
+            req.is_event = false;
+            req.score    = 0.0f;
+            req.lat      = g_gps_lat;
+            req.lon      = g_gps_lon;
+            time(&req.ts);
+            xQueueSend(g_upload_queue, &req, 0);
+        }
         g_dataFile.flush();
         g_dataFile.close();
     }
 
-    buildFileName(g_currentFile, sizeof(g_currentFile));
+    strncpy(g_currentFile, newFile, sizeof(g_currentFile) - 1);
+    g_currentFile[sizeof(g_currentFile) - 1] = '\0';
     g_dataFile = SD.open(g_currentFile, FILE_WRITE);
 
     if (!g_dataFile) {
+        SD_UNLOCK();
         Serial.printf("[SD] ⚠ No se pudo abrir: %s\n", g_currentFile);
         return false;
     }
@@ -617,6 +862,7 @@ static bool openNewFile() {
     FileHeader hdr = { BIN_MAGIC, BIN_VERSION, (uint16_t)SAMPLE_RATE_HZ, g_gps_lat, g_gps_lon };
     g_dataFile.write((uint8_t*)&hdr, sizeof(hdr));
     g_sampleCount = 0;
+    SD_UNLOCK();
 
     Serial.printf("[SD] ✓ Nuevo archivo: %s\n", g_currentFile);
     return true;
@@ -625,6 +871,7 @@ static bool openNewFile() {
 static void writeSample(const Sample &s) {
     if (!g_dataFile) return;
 
+    SD_LOCK();
     g_dataFile.write((uint8_t*)&s, sizeof(s));
     g_sampleCount++;
     g_totalSamples++;
@@ -632,12 +879,14 @@ static void writeSample(const Sample &s) {
     if (g_sampleCount % WRITE_FLUSH_EVERY == 0) {
         g_dataFile.flush();
     }
+    bool rotate = (g_sampleCount >= SAMPLES_PER_FILE);
+    SD_UNLOCK();
 
-    if (g_sampleCount >= SAMPLES_PER_FILE) {
+    if (rotate) {
         Serial.printf("[SD] Archivo completo: %s (%lu muestras, %.1f KB)\n",
                       g_currentFile, g_sampleCount,
                       (sizeof(FileHeader) + g_sampleCount * sizeof(Sample)) / 1024.0f);
-        openNewFile();
+        openNewFile();  // openNewFile() toma su propio SD_LOCK
     }
 }
 
@@ -858,6 +1107,28 @@ static String buildIndexHTML() {
       border-top: 1px solid var(--bord);
       margin-top: 32px;
     }
+    /* ── Árbol de directorios ─────────────────────────────── */
+    .tree-section { margin-bottom: 32px; }
+    details { margin: 4px 0; }
+    summary.ts {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 0.82rem;
+      color: var(--text);
+      cursor: pointer;
+      padding: 7px 12px;
+      list-style: none;
+      border: 1px solid var(--bord);
+      border-radius: 3px;
+      background: var(--panel);
+      display: flex; align-items: center; gap: 8px;
+      user-select: none;
+    }
+    summary.ts:hover { border-color: var(--dim); color: var(--glow); }
+    summary.ts::marker, summary.ts::-webkit-details-marker { display: none; }
+    summary.ts::before { content: "▶"; font-size: 0.6rem; color: var(--dim); min-width: 10px; }
+    details[open] > summary.ts::before { content: "▼"; }
+    .ts-icon { color: var(--warn); }
+    .tree-ch { padding-left: 18px; border-left: 1px solid var(--bord); margin: 3px 0 3px 8px; }
   </style>
 </head>
 <body>
@@ -890,44 +1161,105 @@ static String buildIndexHTML() {
     html += R"rawhtml(
   </div>
   <main>
-    <h2>&#x25A0; Archivos de Datos (.bin)</h2>
-    <div class="file-grid">
 )rawhtml";
 
-    File root = SD.open("/");
-    bool hasFiles = false;
-    if (root) {
-        File f = root.openNextFile();
-        while (f) {
-            String fname = String(f.name());
-            if (!f.isDirectory() && fname.endsWith(".bin")) {
-                hasFiles = true;
-                uint32_t fsz   = f.size();
-                uint32_t nSamp = fsz > sizeof(FileHeader)
-                                 ? (fsz - sizeof(FileHeader)) / sizeof(Sample)
-                                 : 0;
-                float durSec = nSamp / (float)SAMPLE_RATE_HZ;
+    const char* topDirs[]  = { SD_DIR_ACEL,       SD_DIR_EVENTOS };
+    const char* topLabels[] = { "Aceleraciones",   "Eventos" };
 
-                html += "<div class='file-card'>";
-                html += "<div class='file-name'>&#x1F4BE; " + fname + "</div>";
-                html += "<div class='file-meta'>";
-                html += "<b>" + String(fsz / 1024) + " KB</b> &bull; ";
-                html += "<b>" + String(nSamp) + "</b> muestras &bull; ";
-                html += "<b>" + String((int)durSec) + "s</b> duración</div>";
-                html += "<a class='dl-btn' href='/download?f=" + fname + "'>&#x2B07; Descargar</a>";
-                html += "</div>\n";
+    SD_LOCK();
+    for (int d = 0; d < 2; d++) {
+        html += "<div class='tree-section'><h2>&#x25A0; ";
+        html += topLabels[d];
+        html += "</h2>";
+
+        File topDir = SD.open(topDirs[d]);
+        bool hasTop = false;
+        if (topDir) {
+            // Nivel 1: YYYY
+            File yearDir = topDir.openNextFile();
+            while (yearDir) {
+                if (yearDir.isDirectory()) {
+                    hasTop = true;
+                    String yname = String(yearDir.name());
+                    yname = yname.substring(yname.lastIndexOf('/') + 1);
+                    html += "<details open><summary class='ts'><span class='ts-icon'>&#x1F4C1;</span>" + yname + "</summary><div class='tree-ch'>";
+
+                    // Nivel 2: YYYY-MM
+                    File monthDir = yearDir.openNextFile();
+                    while (monthDir) {
+                        if (monthDir.isDirectory()) {
+                            String mname = String(monthDir.name());
+                            mname = mname.substring(mname.lastIndexOf('/') + 1);
+                            html += "<details open><summary class='ts'><span class='ts-icon'>&#x1F4C2;</span>" + mname + "</summary><div class='tree-ch'>";
+
+                            // Nivel 3: YYYY-MM-DD
+                            File dayDir = monthDir.openNextFile();
+                            while (dayDir) {
+                                if (dayDir.isDirectory()) {
+                                    String dname = String(dayDir.name());
+                                    dname = dname.substring(dname.lastIndexOf('/') + 1);
+                                    html += "<details><summary class='ts'><span class='ts-icon'>&#x1F4C5;</span>" + dname + "</summary><div class='tree-ch'>";
+
+                                    // Nivel 4: HH
+                                    File hourDir = dayDir.openNextFile();
+                                    while (hourDir) {
+                                        if (hourDir.isDirectory()) {
+                                            String hname = String(hourDir.name());
+                                            hname = hname.substring(hname.lastIndexOf('/') + 1);
+                                            html += "<details><summary class='ts'><span class='ts-icon'>&#x1F552;</span>" + hname + ":00h</summary><div class='tree-ch'><div class='file-grid'>";
+
+                                            // Nivel 5: archivos .bin
+                                            File binFile = hourDir.openNextFile();
+                                            while (binFile) {
+                                                String bpath = String(binFile.name());
+                                                if (!binFile.isDirectory() && bpath.endsWith(".bin")) {
+                                                    uint32_t fsz   = binFile.size();
+                                                    uint32_t nSamp = fsz > sizeof(FileHeader)
+                                                                     ? (fsz - sizeof(FileHeader)) / sizeof(Sample)
+                                                                     : 0;
+                                                    float    dur   = nSamp / (float)SAMPLE_RATE_HZ;
+                                                    String   fname = bpath.substring(bpath.lastIndexOf('/') + 1);
+                                                    html += "<div class='file-card'>";
+                                                    html += "<div class='file-name'>&#x1F4BE; " + fname + "</div>";
+                                                    html += "<div class='file-meta'><b>" + String(fsz / 1024) + " KB</b> &bull; ";
+                                                    html += "<b>" + String(nSamp) + "</b> muestras &bull; ";
+                                                    html += "<b>" + String((int)dur) + "s</b></div>";
+                                                    html += "<a class='dl-btn' href='/download?f=" + bpath + "'>&#x2B07; Descargar</a>";
+                                                    html += "</div>";
+                                                }
+                                                binFile.close();
+                                                binFile = hourDir.openNextFile();
+                                            }
+                                            html += "</div></div></details>";  // file-grid / tree-ch / details(hour)
+                                        }
+                                        hourDir.close();
+                                        hourDir = dayDir.openNextFile();
+                                    }
+                                    html += "</div></details>";  // tree-ch / details(day)
+                                }
+                                dayDir.close();
+                                dayDir = monthDir.openNextFile();
+                            }
+                            html += "</div></details>";  // tree-ch / details(month)
+                        }
+                        monthDir.close();
+                        monthDir = yearDir.openNextFile();
+                    }
+                    html += "</div></details>";  // tree-ch / details(year)
+                }
+                yearDir.close();
+                yearDir = topDir.openNextFile();
             }
-            f = root.openNextFile();
+            topDir.close();
         }
-        root.close();
+        if (!hasTop) {
+            html += "<div class='empty'>Sin archivos en " + String(topLabels[d]) + ".</div>";
+        }
+        html += "</div>";  // tree-section
     }
-
-    if (!hasFiles) {
-        html += "<div class='empty'>Sin archivos aún. El logger genera uno nuevo cada minuto.</div>";
-    }
+    SD_UNLOCK();
 
     html += R"rawhtml(
-    </div>
   </main>
   <footer>
     DataLogger ADXL345 v2.0 &bull; TTGO T3 V1.6.1 &bull; ODR=200Hz &bull;
@@ -1056,6 +1388,27 @@ void setup() {
     Serial.println("╚══════════════════════════════════════════════╝");
 
     // ── I2C: SDA=21 SCL=22 @400kHz ───────────────────────
+    // Recuperación del bus antes de Wire.begin(): si el ESP32 se resetó a mitad
+    // de una transacción I2C, el slave puede retener SDA en LOW. El protocolo
+    // estándar de recuperación es enviar 9 pulsos en SCL hasta que SDA quede libre,
+    // seguido de una condición STOP. Así el ADXL345 no devuelve 0xFF en el boot.
+    {
+        pinMode(PIN_I2C_SDA, INPUT_PULLUP);
+        pinMode(PIN_I2C_SCL, OUTPUT);
+        for (int i = 0; i < 9; i++) {
+            digitalWrite(PIN_I2C_SCL, LOW);  delayMicroseconds(5);
+            digitalWrite(PIN_I2C_SCL, HIGH); delayMicroseconds(5);
+            if (digitalRead(PIN_I2C_SDA)) break;  // SDA libre → terminar
+        }
+        // Condición STOP: SDA sube mientras SCL está alto
+        pinMode(PIN_I2C_SDA, OUTPUT);
+        digitalWrite(PIN_I2C_SDA, LOW);  delayMicroseconds(5);
+        digitalWrite(PIN_I2C_SCL, HIGH); delayMicroseconds(5);
+        digitalWrite(PIN_I2C_SDA, HIGH); delayMicroseconds(5);
+        pinMode(PIN_I2C_SCL, INPUT_PULLUP);
+        pinMode(PIN_I2C_SDA, INPUT_PULLUP);
+        delayMicroseconds(20);
+    }
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
     Wire.setClock(400000);
     Serial.printf("[I2C] Bus en SDA=%d SCL=%d @400kHz\n", PIN_I2C_SDA, PIN_I2C_SCL);
@@ -1119,13 +1472,21 @@ Serial.println("[OLED] ✓ Pantalla inicializada");
     ensure_sd_dirs();
 
     // ── GPS Neo 6M (5 s timeout → 0.0, 0.0 si sin fix) ──
-    gps_init();
+    //gps_init();
 
     // ── TFLite Micro — cargar modelo + Hanning + FFT ─────
     seismic_inference_init();
 
     // ── WiFi y NTP ────────────────────────────────────────
     connectWiFiEnterprise();
+
+    // ── Fase 3: Identificación, mutex SD, cola y task de upload ──
+    station_init();
+    g_sd_mutex     = xSemaphoreCreateMutex();
+    g_upload_queue = xQueueCreate(UPLOAD_QUEUE_SIZE, sizeof(UploadReq));
+    // Stack de 20 KB — mbedTLS (Firebase HTTPS) necesita ~15-18 KB para el handshake SSL
+    xTaskCreatePinnedToCore(upload_task, "upload", 20480, nullptr, 1, nullptr, 0);
+    Serial.println("[Upload] Task iniciada en Core 0");
 
     // ── Abrir primer archivo de datos ─────────────────────
     if (!openNewFile()) {
@@ -1213,7 +1574,7 @@ void loop() {
     }
 
     // ── Actualizar GPS (no bloqueante) ────────────────────
-    gps_update();
+    //gps_update();
 
     // ── 6. Diagnóstico serial cada 5 segundos ─────────────
     static uint32_t lastPrint = 0;
