@@ -14,7 +14,7 @@
 #define WIFI_USERNAME   ""
 #define WIFI_PASSWORD   ""*/
 
-#define WIFI_SSID "REMOVED"
+#define WIFI_SSID "REMOVED's home"
 #define WIFI_PASS "REMOVED"
 
 // ---- NTP / Zona horaria ------------------------------------
@@ -125,11 +125,26 @@
 #define SEISMIC_WIN_SAMPLES  800      // 4.0 s × 200 Hz
 #define SEISMIC_TIME_BINS    11       // 1 + (800-128)/64  (fórmula scipy)
 #define SEISMIC_FREQ_BINS    65       // nperseg/2 + 1
-#define TENSOR_ARENA_SIZE    (48 * 1024)
+#define TENSOR_ARENA_SIZE    (64 * 1024)
+
+// ---- STA/LTA trigger (mismos parámetros que seismic_dataset_builder_v3) ----
+// EMA (exponential moving average): evita ring buffer, 5 flops/muestra.
+// τ_STA = 0.5 s · τ_LTA = 10 s — igual que builder Python.
+// Warmup: 30 s para que g_lta converja (3×τ_LTA → error < 5 %).
+#define STA_SAMPLES    100      // 0.5 s @ 200 Hz
+#define LTA_SAMPLES    2000     // 10.0 s @ 200 Hz
+#define STA_LTA_ON     2.5f     // ratio para activar trigger
+#define STA_LTA_OFF    1.5f     // ratio para desactivar trigger
+#define STA_LTA_WARMUP 6000     // 30 s de calentamiento al arrancar
 
 // ---- Rutas SD (logger dual) --------------------------------
 #define SD_DIR_ACEL      "/Aceleraciones"
 #define SD_DIR_EVENTOS   "/Eventos"
+
+// ---- Simulación desde SD (solo para validación, comentar en producción) ----
+// Descomentar para reproducir un sismo real almacenado en la SD.
+// Generar el archivo con: Data_Labeling/anc_to_sim.py
+//define SIM_REPLAY_FILE   "/sim_sismo.bin"
 
 // ---- Identificación de estación ----------------------------
 // Valor real proviene de .env vía load_env.py.

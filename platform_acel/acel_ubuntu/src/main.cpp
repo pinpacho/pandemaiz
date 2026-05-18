@@ -289,17 +289,24 @@ static int16_t  g_win_ay[SEISMIC_WIN_SAMPLES];
 static int16_t  g_win_az[SEISMIC_WIN_SAMPLES];
 static uint32_t g_win_ptr = 0;
 
-// --- TFLite Micro (buffers estáticos — sin fragmentación heap)
-// tensor_arena=60KB, g_spec=8.6KB, g_fft_buf=1KB, g_hann128=0.5KB
-// Total adicional ~74.8 KB / 520 KB SRAM disponibles
-static uint8_t   g_tensor_arena[TENSOR_ARENA_SIZE];
+// --- STA/LTA trigger (EMA, mismos parámetros que seismic_dataset_builder_v3)
+static float    g_sta        = 0.0f;
+static float    g_lta        = 1e-6f;   // init > 0 para evitar div/0 en primer ratio
+static bool     g_sta_trig   = false;
+static int      g_lta_warmup = STA_LTA_WARMUP;
+static uint32_t g_sta_hold   = 0;       // hold-off: trigger permanece activo ≥ 1 ventana
+
+// --- TFLite Micro
+// tensor_arena en heap para no saturar la BSS (límite dram0_0_seg ~124 KB).
+// g_spec=8.6KB, g_fft_buf=1KB, g_hann128=0.5KB en BSS.
+static uint8_t*  g_tensor_arena = nullptr;
 static float     g_spec[SEISMIC_FREQ_BINS][SEISMIC_TIME_BINS][3];
 static float     g_fft_buf[256];
 static float     g_hann128[128];
 static tflite::MicroErrorReporter                 g_tflite_error_reporter;
-// Solo los ops que usa el 1D-CNN: Conv2D, MaxPool, Reshape, Transpose,
-// Mean (GlobalAvgPool), FullyConnected, Logistic, Relu
-static tflite::MicroMutableOpResolver<11>         g_tflite_resolver;
+// Ops del modelo dual (spec CNN + pga Dense): Conv2D, MaxPool, Reshape,
+// Transpose, Mean, FullyConnected, Logistic, Relu + Concatenation para fusión
+static tflite::MicroMutableOpResolver<13>         g_tflite_resolver;
 static tflite::MicroInterpreter*                  g_tflite_interp = nullptr;
 
 // ── Fase 3: Comunicación ─────────────────────────────────────────────────────
@@ -345,6 +352,69 @@ static uint8_t adxl_read(uint8_t reg) {
 
 // Lectura en ráfaga de 6 bytes (X0,X1,Y0,Y1,Z0,Z1) — más eficiente
 static bool adxl_readXYZ(int16_t &ax, int16_t &ay, int16_t &az) {
+#ifdef SIM_REPLAY_FILE
+    // Reproduce un archivo .bin de la SD en lugar de leer el I2C.
+    // Formato: 8-byte header (magic+ver+fs+reserved) + muestras de 10 bytes.
+    // Cuando el archivo se agota, cae al I2C normal (s_sim_done=true).
+    {
+        static File     s_sim_file;
+        static bool     s_sim_open  = false;
+        static bool     s_sim_done  = false;
+        static uint32_t s_sim_count = 0;   // muestras reproducidas
+        static uint32_t s_total_samples = 0;
+        if (!s_sim_done) {
+            if (!s_sim_open) {
+                // Esperar a que SD esté montada (adxl_readXYZ se llama durante
+                // autocal, ANTES de SD.begin() en setup()).
+                if (SD.cardType() == CARD_NONE) goto sim_i2c_fallback;
+                s_sim_file = SD.open(SIM_REPLAY_FILE, FILE_READ);
+                if (s_sim_file) {
+                    s_sim_file.seek(8);   // saltar header de 8 bytes
+                    s_sim_open = true;
+                    s_total_samples = (s_sim_file.size() - 8) / 10;
+                    Serial.println();
+                    Serial.println("================================================");
+                    Serial.printf ("[SIM] Archivo reconocido: " SIM_REPLAY_FILE "\n");
+                    Serial.printf ("[SIM] Duracion: %lu s  (%lu muestras @ 200 Hz)\n",
+                                   s_total_samples / 200, s_total_samples);
+                    Serial.println("================================================");
+                    Serial.println();
+                } else {
+                    s_sim_done = true;
+                    Serial.println("[SIM] ERROR: no se encontro " SIM_REPLAY_FILE " en SD");
+                }
+            }
+            if (s_sim_open && s_sim_file.available() >= 10) {
+                uint32_t ts;
+                s_sim_file.read((uint8_t*)&ts, 4);
+                s_sim_file.read((uint8_t*)&ax, 2);
+                s_sim_file.read((uint8_t*)&ay, 2);
+                s_sim_file.read((uint8_t*)&az, 2);
+                s_sim_count++;
+                // Progreso cada 10 s (2000 muestras)
+                if (s_sim_count % 2000 == 0) {
+                    uint32_t elapsed_s = s_sim_count / 200;
+                    uint32_t total_s   = s_total_samples / 200;
+                    Serial.printf("[SIM] Progreso: %lu/%lu s\n", elapsed_s, total_s);
+                }
+                return true;
+            }
+            if (s_sim_open) {
+                s_sim_file.close();
+                s_sim_open = false;
+                Serial.println();
+                Serial.println("================================================");
+                Serial.printf ("[SIM] Simulacion completada (%lu muestras)\n", s_sim_count);
+                Serial.println("[SIM] Volviendo a sensor I2C");
+                Serial.println("================================================");
+                Serial.println();
+            }
+            s_sim_done = true;
+        }
+        // s_sim_done: caer al I2C normal
+    }
+    sim_i2c_fallback:;   // destino del goto cuando SD aún no está montada
+#endif
     Wire.beginTransmission(ADXL345_I2C_ADDR);
     Wire.write(ADXL345_REG::DATAX0);
     if (Wire.endTransmission(false) != 0) return false;
@@ -523,7 +593,14 @@ static void seismic_inference_init() {
     for (int n = 0; n < 128; n++)
         g_hann128[n] = 0.5f * (1.0f - cosf(2.0f * M_PI * n / 127.0f));
 
-    // Ops del 1D-CNN + cuantización
+    g_tensor_arena = (uint8_t*)malloc(TENSOR_ARENA_SIZE);
+    if (!g_tensor_arena) {
+        ESP_LOGE("TFLite", "malloc tensor_arena %u B falló — heap libre: %u B",
+                 TENSOR_ARENA_SIZE, (unsigned)esp_get_free_heap_size());
+        return;
+    }
+
+    // Ops del CNN dual (spec Conv2D + pga Dense) + cuantización
     g_tflite_resolver.AddConv2D();
     g_tflite_resolver.AddMaxPool2D();
     g_tflite_resolver.AddReshape();
@@ -533,8 +610,10 @@ static void seismic_inference_init() {
     g_tflite_resolver.AddLogistic();
     g_tflite_resolver.AddRelu();
     g_tflite_resolver.AddQuantize();
+    g_tflite_resolver.AddDequantize();    // INT8→float32 en output del modelo
     g_tflite_resolver.AddShape();
-    g_tflite_resolver.AddStridedSlice(); // indexación tensor[..., -1] / slicing
+    g_tflite_resolver.AddStridedSlice();
+    g_tflite_resolver.AddConcatenation();
 
     const tflite::Model* mdl = tflite::GetModel(seismic_model_data);
     tflite::MicroAllocator* allocator = tflite::MicroAllocator::Create(
@@ -577,16 +656,34 @@ static void _spec_axis(const int16_t* buf, int ch) {
 static float run_inference() {
     if (!g_tflite_interp) return 0.0f;
 
+    // ── PGA: máximo absoluto por eje en la ventana filtrada (0.1–20 Hz) ──
+    constexpr float LSB_G = 1.0f / 256.0f;
+    float pga[3] = {0.0f, 0.0f, 0.0f};
+    for (int i = 0; i < SEISMIC_WIN_SAMPLES; i++) {
+        float ax = fabsf(g_win_ax[i] * LSB_G);
+        float ay = fabsf(g_win_ay[i] * LSB_G);
+        float az = fabsf(g_win_az[i] * LSB_G);
+        if (ax > pga[0]) pga[0] = ax;
+        if (ay > pga[1]) pga[1] = ay;
+        if (az > pga[2]) pga[2] = az;
+    }
+
     _spec_axis(g_win_ax, 0);   // canal 0: EW  (ax)
     _spec_axis(g_win_az, 1);   // canal 1: VER (az)
     _spec_axis(g_win_ay, 2);   // canal 2: NS  (ay)
 
-    float* inp = g_tflite_interp->input(0)->data.f;
+    // TFLite pone PGA como input(0) y espectrograma como input(1)
+    // (orden determinado por get_input_details() tras model.export())
+    float* inp_pga = g_tflite_interp->input(0)->data.f;
+    for (int c = 0; c < 3; c++)
+        inp_pga[c] = (pga[c] - SEISMIC_PGA_MEAN[c]) / SEISMIC_PGA_STD[c];
+
+    float* inp_spec = g_tflite_interp->input(1)->data.f;
     int idx = 0;
     for (int f = 0; f < SEISMIC_FREQ_BINS; f++)
         for (int t = 0; t < SEISMIC_TIME_BINS; t++)
             for (int c = 0; c < 3; c++)
-                inp[idx++] = (g_spec[f][t][c] - SEISMIC_NORM_MEAN) / SEISMIC_NORM_STD;
+                inp_spec[idx++] = (g_spec[f][t][c] - SEISMIC_NORM_MEAN) / SEISMIC_NORM_STD;
 
     g_tflite_interp->Invoke();
     return g_tflite_interp->output(0)->data.f[0];
@@ -617,9 +714,9 @@ static void firebase_init() {
 
     Firebase.begin(&g_fbConfig, &g_fbAuth);
     Firebase.reconnectNetwork(true);
-    // RX=4096 para recibir certificados TLS de Google (~3-4 KB por registro)
+    // RX=16384 (default Firebase_ESP_Client): certificate chain + fragmentación SSL
     // TX=512 es suficiente para ClientHello mbedTLS (< 300 bytes)
-    g_fbdo.setBSSLBufferSize(4096, 512);
+    g_fbdo.setBSSLBufferSize(16384, 512);
     Serial.println("[Firebase] Inicializado");
 }
 
@@ -726,11 +823,15 @@ static void upload_task(void* param) {
     }
 
     UploadReq req;
+    uint32_t fb_retry_ms = 1000;
     for (;;) {
         if (!Firebase.ready()) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            vTaskDelay(pdMS_TO_TICKS(fb_retry_ms));
+            fb_retry_ms *= 2;
+            if (fb_retry_ms > 30000) fb_retry_ms = 30000;
             continue;
         }
+        fb_retry_ms = 1000;
         if (xQueueReceive(g_upload_queue, &req, pdMS_TO_TICKS(200)) == pdTRUE) {
             if (req.is_event) firebase_alert_rtdb(req);
             rtdb_log_file(req);
@@ -1559,17 +1660,50 @@ void loop() {
     };
     writeSample(s);
 
-    // ── 5. Acumular ventana e inferencia CNN cada 4 s ─────
+    // ── 3b. STA/LTA energy detector (EMA inline) ──────────
+    // Activa inferencia CNN solo ante actividad sísmica potencial.
+    // τ_STA=0.5 s · τ_LTA=10 s — mismos parámetros que el builder Python.
+    // Reset de ventana en el onset asegura que el espectrograma
+    // siempre empieza en el momento del evento (= patrón de entrenamiento).
+    {
+        float e = (float)ax_f*(float)ax_f
+                + (float)ay_f*(float)ay_f
+                + (float)az_f*(float)az_f;
+        g_sta += (e - g_sta) * (1.0f / STA_SAMPLES);
+        g_lta += (e - g_lta) * (1.0f / LTA_SAMPLES);
+        if (g_lta_warmup > 0) {
+            --g_lta_warmup;
+        } else {
+            float ratio = g_sta / g_lta;
+            if (!g_sta_trig && ratio >= STA_LTA_ON) {
+                g_sta_trig = true;
+                g_win_ptr  = 0;                    // ventana fresca desde el onset
+                g_sta_hold = SEISMIC_WIN_SAMPLES;  // hold ≥ 1 ventana completa (4 s)
+                Serial.printf("[STA/LTA] TRIGGER  ratio=%.2f\n", ratio);
+            } else if (g_sta_trig) {
+                if (g_sta_hold > 0) {
+                    --g_sta_hold;
+                } else if (ratio < STA_LTA_OFF) {
+                    g_sta_trig = false;
+                    Serial.printf("[STA/LTA] detrigger ratio=%.2f\n", ratio);
+                }
+            }
+        }
+    }
+
+    // ── 5. Acumular ventana e inferencia CNN (solo si STA/LTA activo) ─────
     g_win_ax[g_win_ptr] = ax_f;
     g_win_ay[g_win_ptr] = ay_f;
     g_win_az[g_win_ptr] = az_f;
     if (++g_win_ptr >= SEISMIC_WIN_SAMPLES) {
         g_win_ptr = 0;
-        float score = run_inference();        // ~80–120 ms cada 4 s
-        Serial.printf("[CNN] score=%.3f  %s\n",
-                      score, score > SEISMIC_THRESHOLD ? "SISMO" : "ruido");
-        if (score > SEISMIC_THRESHOLD) {
-            saveEventFile(score);
+        if (g_sta_trig) {
+            float score = run_inference();    // ~80–120 ms, solo ante evento
+            Serial.printf("[CNN] score=%.3f  %s\n",
+                          score, score > SEISMIC_THRESHOLD ? "SISMO" : "ruido");
+            if (score > SEISMIC_THRESHOLD) {
+                saveEventFile(score);
+            }
         }
     }
 
