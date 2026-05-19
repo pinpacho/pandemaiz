@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PANdeMaiz Quake — Dashboard</title>
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Barra superior ───────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.6rem 1.2rem;
+      background: #1a1d27;
+      border-bottom: 1px solid #2d3748;
+      flex-shrink: 0;
+    }
+
+    header h1 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+    }
+
+    header h1 span { color: #f6ad55; }
+
+    #status-bar {
+      font-size: 0.8rem;
+      color: #a0aec0;
+    }
+
+    #global-alert-banner {
+      display: none;
+      background: #c53030;
+      color: #fff;
+      text-align: center;
+      padding: 0.45rem;
+      font-weight: 700;
+      font-size: 0.95rem;
+      letter-spacing: 0.05em;
+      flex-shrink: 0;
+      animation: pulse 1s infinite alternate;
+    }
+
+    @keyframes pulse { from { opacity: 1; } to { opacity: 0.7; } }
+
+    /* ── Cuerpo principal ─────────────────────────────────── */
+    main {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* ── Panel lateral ────────────────────────────────────── */
+    #sidebar {
+      width: 300px;
+      background: #1a1d27;
+      border-right: 1px solid #2d3748;
+      overflow-y: auto;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #sidebar h2 {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #718096;
+      padding: 0.8rem 1rem 0.4rem;
+      border-bottom: 1px solid #2d3748;
+      flex-shrink: 0;
+    }
+
+    #station-list { flex: 1; }
+
+    .station-card {
+      padding: 0.7rem 1rem;
+      border-bottom: 1px solid #2d3748;
+      cursor: default;
+      transition: background 0.15s;
+    }
+
+    .station-card:hover { background: #252836; }
+
+    .station-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.25rem;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot-green { background: #48bb78; box-shadow: 0 0 6px #48bb78; }
+    .dot-red   { background: #fc4444; box-shadow: 0 0 8px #fc4444; animation: pulse 0.8s infinite alternate; }
+    .dot-grey  { background: #718096; }
+
+    .station-name { font-weight: 600; font-size: 0.9rem; }
+
+    .station-meta {
+      font-size: 0.75rem;
+      color: #a0aec0;
+      padding-left: 1.35rem;
+    }
+
+    /* ── Mapa ─────────────────────────────────────────────── */
+    #map { flex: 1; }
+
+    /* ── Popup personalizado ──────────────────────────────── */
+    .leaflet-popup-content-wrapper {
+      background: #1a1d27;
+      color: #e2e8f0;
+      border: 1px solid #4a5568;
+      border-radius: 8px;
+    }
+
+    .leaflet-popup-tip { background: #1a1d27; }
+
+    .popup-title { font-weight: 700; font-size: 1rem; margin-bottom: 0.4rem; }
+
+    .popup-row { font-size: 0.8rem; margin-bottom: 0.15rem; }
+    .popup-row span { color: #a0aec0; }
+
+    .popup-links { margin-top: 0.6rem; display: flex; gap: 0.4rem; flex-wrap: wrap; }
+
+    .popup-btn {
+      background: #2d3748;
+      color: #e2e8f0;
+      border: 1px solid #4a5568;
+      border-radius: 4px;
+      padding: 0.25rem 0.5rem;
+      font-size: 0.75rem;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .popup-btn:hover { background: #4a5568; }
+
+    /* ── Panel de descarga histórica ─────────────────────── */
+    #download-panel {
+      border-top: 2px solid #2d3748;
+      background: #13151f;
+      padding: 0.9rem 1rem;
+      flex-shrink: 0;
+    }
+
+    #download-panel h2 {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #718096;
+      margin-bottom: 0.7rem;
+      border: none;
+      padding: 0;
+    }
+
+    .dp-label {
+      font-size: 0.72rem;
+      color: #a0aec0;
+      display: block;
+      margin-bottom: 0.2rem;
+    }
+
+    .dp-field { margin-bottom: 0.6rem; }
+
+    .dp-select, .dp-input {
+      width: 100%;
+      background: #1a1d27;
+      border: 1px solid #2d3748;
+      border-radius: 5px;
+      color: #e2e8f0;
+      padding: 0.35rem 0.5rem;
+      font-size: 0.8rem;
+      outline: none;
+    }
+    .dp-select:focus, .dp-input:focus { border-color: #4a90e2; }
+
+    /* Botones de hora disponible */
+    #hour-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.3rem;
+      min-height: 28px;
+    }
+
+    .hour-btn {
+      background: #2d3748;
+      border: 1px solid #4a5568;
+      border-radius: 4px;
+      color: #e2e8f0;
+      padding: 0.2rem 0.45rem;
+      font-size: 0.78rem;
+      cursor: pointer;
+      transition: background 0.1s, border-color 0.1s;
+    }
+    .hour-btn:hover   { background: #3a4a5c; }
+    .hour-btn.active  { background: #2b6cb0; border-color: #4299e1; color: #fff; }
+
+    #hour-hint {
+      font-size: 0.7rem;
+      color: #718096;
+      font-style: italic;
+    }
+
+    /* Radio de formato */
+    .format-group {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .fmt-label {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.78rem;
+      cursor: pointer;
+      padding: 0.25rem 0.5rem;
+      border: 1px solid #2d3748;
+      border-radius: 4px;
+      transition: border-color 0.1s;
+    }
+    .fmt-label:has(input:checked) { border-color: #4299e1; background: #1a3254; }
+
+    /* Botón de descarga */
+    #btn-download-zip {
+      width: 100%;
+      margin-top: 0.7rem;
+      padding: 0.5rem;
+      background: #276749;
+      border: none;
+      border-radius: 5px;
+      color: #fff;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    #btn-download-zip:hover:not(:disabled) { background: #2f855a; }
+    #btn-download-zip:disabled { background: #2d3748; color: #718096; cursor: not-allowed; }
+
+    #download-status {
+      font-size: 0.7rem;
+      color: #a0aec0;
+      margin-top: 0.3rem;
+      min-height: 1rem;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>PANdeMaiz <span>Quake</span> — Red Sísmica UdeA / GICM</h1>
+    <div id="status-bar">Conectando…</div>
+  </header>
+
+  <div id="global-alert-banner">⚠ ALERTA SÍSMICA GLOBAL DETECTADA</div>
+
+  <main>
+    <div id="sidebar">
+      <h2>Estaciones</h2>
+      <div id="station-list"></div>
+
+      <!-- ── Panel de descarga histórica ─────────────────── -->
+      <div id="download-panel">
+        <h2>↓ Descarga Histórica</h2>
+
+        <!-- Estación -->
+        <div class="dp-field">
+          <label class="dp-label" for="sel-station">Estación</label>
+          <select id="sel-station" class="dp-select">
+            <option value="">— Selecciona —</option>
+          </select>
+        </div>
+
+        <!-- Fecha -->
+        <div class="dp-field">
+          <label class="dp-label" for="sel-date">Fecha</label>
+          <input id="sel-date" type="date" class="dp-input" />
+        </div>
+
+        <!-- Horas disponibles -->
+        <div class="dp-field">
+          <label class="dp-label">Hora disponible</label>
+          <div id="hour-grid">
+            <span id="hour-hint">Elige estación y fecha</span>
+          </div>
+        </div>
+
+        <!-- Formato de salida -->
+        <div class="dp-field">
+          <label class="dp-label">Formato de salida</label>
+          <div class="format-group">
+            <label class="fmt-label">
+              <input type="radio" name="fmt" value="bin" checked /> .bin
+            </label>
+            <label class="fmt-label">
+              <input type="radio" name="fmt" value="anc" /> .anc
+            </label>
+            <label class="fmt-label">
+              <input type="radio" name="fmt" value="mseed" /> .mseed
+            </label>
+          </div>
+        </div>
+
+        <button id="btn-download-zip" disabled>Descargar ZIP</button>
+        <div id="download-status"></div>
+      </div>
+      <!-- ── fin panel ──────────────────────────────────── -->
+    </div>
+
+    <div id="map"></div>
+  </main>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

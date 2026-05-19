@@ -36,11 +36,11 @@ platform_acel/**/.vscode/
 
 # ── Credenciales y configuración sensible ────────────────────
 .env
-.env.*
+.env.
 config.local.h
 secrets.h
 serviceAccountKey.json
-firebase-adminsdk*.json
+*firebase-adminsdk*.json
 google-credentials*.json
 
 # ── IDEs ─────────────────────────────────────────────────────
@@ -54,3 +54,6 @@ google-credentials*.json
 .DS_Store
 Thumbs.db
 *.log
+
+
+backend/.env 
