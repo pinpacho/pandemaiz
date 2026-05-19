@@ -992,25 +992,29 @@ static void writeSample(const Sample &s) {
 }
 
 // ============================================================
-//  WIFI WPA2-ENTERPRISE (PEAP / MSCHAPv2)
+//  WIFI — Personal (WPA2) o Enterprise (PEAP/MSCHAPv2)
+//  Auto-detección: si WIFI_IDENTITY y WIFI_USERNAME no vacíos → Enterprise
 // ============================================================
-static void connectWiFiEnterprise() {
-    Serial.printf("[WiFi] Conectando a SSID: %s\n", WIFI_SSID);
-
+static void connectWiFi() {
     WiFi.disconnect(true);
     delay(200);
     WiFi.mode(WIFI_STA);
 
-    /*esp_wifi_sta_wpa2_ent_set_identity(
-        (uint8_t*)WIFI_IDENTITY, strlen(WIFI_IDENTITY));
-    esp_wifi_sta_wpa2_ent_set_username(
-        (uint8_t*)WIFI_USERNAME, strlen(WIFI_USERNAME));
-    esp_wifi_sta_wpa2_ent_set_password(
-        (uint8_t*)WIFI_PASSWORD, strlen(WIFI_PASSWORD));
-    esp_wifi_sta_wpa2_ent_enable();
-    WiFi.begin(WIFI_SSID);*/
-
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    if (strlen(WIFI_IDENTITY) > 0 && strlen(WIFI_USERNAME) > 0) {
+        Serial.printf("[WiFi] Modo Enterprise — SSID: %s  usuario: %s\n",
+                      WIFI_SSID, WIFI_USERNAME);
+        esp_wifi_sta_wpa2_ent_set_identity(
+            (uint8_t*)WIFI_IDENTITY, strlen(WIFI_IDENTITY));
+        esp_wifi_sta_wpa2_ent_set_username(
+            (uint8_t*)WIFI_USERNAME, strlen(WIFI_USERNAME));
+        esp_wifi_sta_wpa2_ent_set_password(
+            (uint8_t*)WIFI_PASS, strlen(WIFI_PASS));
+        esp_wifi_sta_wpa2_ent_enable();
+        WiFi.begin(WIFI_SSID);
+    } else {
+        Serial.printf("[WiFi] Modo Personal — SSID: %s\n", WIFI_SSID);
+        WiFi.begin(WIFI_SSID, WIFI_PASS);
+    }
 
     Serial.print("[WiFi] Esperando conexión");
     uint8_t retries = 0;
@@ -1579,7 +1583,7 @@ Serial.println("[OLED] ✓ Pantalla inicializada");
     seismic_inference_init();
 
     // ── WiFi y NTP ────────────────────────────────────────
-    connectWiFiEnterprise();
+    connectWiFi();
 
     // ── Fase 3: Identificación, mutex SD, cola y task de upload ──
     station_init();

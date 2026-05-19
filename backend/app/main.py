@@ -65,6 +65,9 @@ app.include_router(alerts.router)
 app.include_router(download.router)
 app.include_router(history.router)
 
+# Los logos se sirven desde /logos (mount antes del catch-all /).
+app.mount("/logos", StaticFiles(directory="logos"), name="logos")
+
 # El mount de archivos estáticos debe ir al final: captura todo lo que
 # no coincida con las rutas de API anteriores.
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

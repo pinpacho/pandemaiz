@@ -8,14 +8,21 @@
 //  SAMPLE_RATE_HZ o las frecuencias de corte BP_HP/LP_FREQ_HZ.
 // ============================================================
 
-// ---- WiFi WPA2-Enterprise (PEAP/MSCHAPv2) ------------------
-/*#define WIFI_SSID       ""
-#define WIFI_IDENTITY   ""
-#define WIFI_USERNAME   ""
-#define WIFI_PASSWORD   ""*/
-
-#define WIFI_SSID "REMOVED's home"
-#define WIFI_PASS "REMOVED"
+// ---- WiFi — credenciales en .env (load_env.py las inyecta) -
+// Personal  (WPA2):  definir WIFI_SSID + WIFI_PASS
+// Enterprise (PEAP): definir además WIFI_IDENTITY + WIFI_USERNAME
+#ifndef WIFI_SSID
+#define WIFI_SSID     "YOUR_SSID"
+#endif
+#ifndef WIFI_PASS
+#define WIFI_PASS     "YOUR_PASSWORD"
+#endif
+#ifndef WIFI_IDENTITY
+#define WIFI_IDENTITY ""
+#endif
+#ifndef WIFI_USERNAME
+#define WIFI_USERNAME ""
+#endif
 
 // ---- NTP / Zona horaria ------------------------------------
 // Colombia = UTC-5 (sin horario de verano)

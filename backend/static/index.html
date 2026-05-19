@@ -5,73 +5,175 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PANdeMaiz Quake — Dashboard</title>
 
-  <!-- Leaflet CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 
   <style>
+    /* ══ PALETA ══════════════════════════════════════════════════════════════
+       Inspirada en los logos institucionales:
+         Verde UdeA       #006837  (Pantone 356 C oficial)
+         Verde oscuro     #0d1f10  (fondo sidebar)
+         Rojo sísmico     #9b1c1c  (ondas PANdeMaiz)
+         Dorado maíz      #c49a0e  (grano de maíz)
+         Fondo cuerpo     #070d08
+    ══════════════════════════════════════════════════════════════════════ */
+    :root {
+      --bg-body:        #33691e;
+      --bg-header:      #33691e;
+
+      --bg-sidebar:     #ffffff;
+      --bg-panel:       #f4f9f5;
+      --bg-card:        #ffffff;
+      --bg-card-hover:  #edf5ef;
+      --bg-input:       #ffffff;
+      --bg-btn:         #edf5ef;
+
+      --border:         #c8dece;
+      --border-focus:   #006837;
+
+      --accent:         #006837;
+      --accent-h:       #008545;
+      --accent-dim:     #d0ead8;
+
+      --alert:          #9b1c1c;
+      --alert-h:        #b91c1c;
+      --alert-glow:     rgba(155, 28, 28, 0.6);
+
+      --gold:           #c49a0e;
+      --gold-dim:       #8a6d08;
+
+      --text:           #1a2e1c;
+      --text-muted:     #4a7055;
+      --text-dim:       #8aaa90;
+
+      --green-glow:     rgba(0, 104, 55, 0.4);
+    }
+
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      font-family: 'Segoe UI', sans-serif;
-      background: #0f1117;
-      color: #e2e8f0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg-body);
+      color: var(--text);
       display: flex;
       flex-direction: column;
       height: 100vh;
       overflow: hidden;
     }
 
-    /* ── Barra superior ───────────────────────────────────── */
+    /* ── Header ──────────────────────────────────────────────── */
     header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 0.6rem 1.2rem;
-      background: #1a1d27;
-      border-bottom: 1px solid #2d3748;
+      padding: 0 1.2rem;
+      height: 62px;
+      background: var(--bg-header);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      gap: 1rem;
+    }
+
+    /* Bloque izquierdo: logo PANdeMaiz + título */
+    .header-brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      min-width: 0;
+    }
+
+    .header-brand img {
+      height: 48px;
+      width: 48px;
+      object-fit: contain;
       flex-shrink: 0;
     }
 
-    header h1 {
-      font-size: 1.1rem;
-      font-weight: 600;
-      letter-spacing: 0.03em;
+    .brand-text h1 {
+      font-size: 1.05rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      line-height: 1.2;
+      white-space: nowrap;
     }
 
-    header h1 span { color: #f6ad55; }
+    .brand-text h1 .pan  { color: #ffffff; }
+    .brand-text h1 .quake { color: #ffffff; }
+
+    .brand-text p {
+      font-size: 0.7rem;
+      color: #ffffff;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    /* Bloque derecho: logos institucionales + status */
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      flex-shrink: 0;
+    }
+
+    /* Contenedor de logos institucionales con fondo crema */
+    .inst-logos {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      background: #f5f0e8;
+      border-radius: 7px;
+      padding: 4px 10px;
+      border: 1px solid var(--border);
+    }
+
+    .inst-logos img {
+      height: 38px;
+      object-fit: contain;
+    }
+
+    .inst-divider {
+      width: 1px;
+      height: 30px;
+      background: #ccc;
+    }
 
     #status-bar {
-      font-size: 0.8rem;
-      color: #a0aec0;
+      font-size: 0.75rem;
+      color: #ffffff;
+      text-align: right;
+      min-width: 130px;
     }
 
+    /* ── Banner de alerta ────────────────────────────────────── */
     #global-alert-banner {
       display: none;
-      background: #c53030;
+      background: var(--alert);
       color: #fff;
       text-align: center;
-      padding: 0.45rem;
+      padding: 0.4rem;
       font-weight: 700;
-      font-size: 0.95rem;
-      letter-spacing: 0.05em;
+      font-size: 0.9rem;
+      letter-spacing: 0.06em;
       flex-shrink: 0;
-      animation: pulse 1s infinite alternate;
+      animation: pulse-alert 0.9s infinite alternate;
     }
 
-    @keyframes pulse { from { opacity: 1; } to { opacity: 0.7; } }
+    @keyframes pulse-alert {
+      from { opacity: 1; box-shadow: 0 0 0 0 var(--alert-glow); }
+      to   { opacity: 0.85; box-shadow: 0 0 12px 4px var(--alert-glow); }
+    }
 
-    /* ── Cuerpo principal ─────────────────────────────────── */
+    /* ── Cuerpo ──────────────────────────────────────────────── */
     main {
       display: flex;
       flex: 1;
       overflow: hidden;
     }
 
-    /* ── Panel lateral ────────────────────────────────────── */
+    /* ── Sidebar ─────────────────────────────────────────────── */
     #sidebar {
       width: 300px;
-      background: #1a1d27;
-      border-right: 1px solid #2d3748;
+      background: var(--bg-sidebar);
+      border-right: 1px solid var(--border);
       overflow-y: auto;
       flex-shrink: 0;
       display: flex;
@@ -79,214 +181,281 @@
     }
 
     #sidebar h2 {
-      font-size: 0.75rem;
+      font-size: 0.68rem;
       text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: #718096;
-      padding: 0.8rem 1rem 0.4rem;
-      border-bottom: 1px solid #2d3748;
+      letter-spacing: 0.1em;
+      color: var(--text-muted);
+      padding: 0.75rem 1rem 0.4rem;
+      border-bottom: 1px solid var(--border);
       flex-shrink: 0;
     }
 
     #station-list { flex: 1; }
 
     .station-card {
-      padding: 0.7rem 1rem;
-      border-bottom: 1px solid #2d3748;
+      padding: 0.65rem 1rem;
+      border-bottom: 1px solid var(--border);
       cursor: default;
-      transition: background 0.15s;
+      transition: background 0.12s;
     }
 
-    .station-card:hover { background: #252836; }
+    .station-card:hover { background: var(--bg-card-hover); }
 
     .station-header {
       display: flex;
       align-items: center;
       gap: 0.5rem;
-      margin-bottom: 0.25rem;
+      margin-bottom: 0.2rem;
     }
 
     .dot {
-      width: 10px;
-      height: 10px;
+      width: 9px;
+      height: 9px;
       border-radius: 50%;
       flex-shrink: 0;
     }
-    .dot-green { background: #48bb78; box-shadow: 0 0 6px #48bb78; }
-    .dot-red   { background: #fc4444; box-shadow: 0 0 8px #fc4444; animation: pulse 0.8s infinite alternate; }
-    .dot-grey  { background: #718096; }
 
-    .station-name { font-weight: 600; font-size: 0.9rem; }
+    .dot-green {
+      background: var(--accent);
+      box-shadow: 0 0 6px var(--green-glow);
+    }
+    .dot-red {
+      background: var(--alert);
+      box-shadow: 0 0 8px var(--alert-glow);
+      animation: pulse-alert 0.8s infinite alternate;
+    }
+    .dot-grey { background: var(--text-dim); }
 
-    .station-meta {
-      font-size: 0.75rem;
-      color: #a0aec0;
-      padding-left: 1.35rem;
+    .station-name {
+      font-weight: 600;
+      font-size: 0.88rem;
+      color: var(--text);
     }
 
-    /* ── Mapa ─────────────────────────────────────────────── */
+    .station-meta {
+      font-size: 0.72rem;
+      color: #33691e;
+      padding-left: 1.3rem;
+    }
+
+    /* ── Mapa ────────────────────────────────────────────────── */
     #map { flex: 1; }
 
-    /* ── Popup personalizado ──────────────────────────────── */
+    /* ── Popup ───────────────────────────────────────────────── */
     .leaflet-popup-content-wrapper {
-      background: #1a1d27;
-      color: #e2e8f0;
-      border: 1px solid #4a5568;
+      background: var(--bg-sidebar);
+      color: var(--text);
+      border: 1px solid var(--border);
       border-radius: 8px;
     }
 
-    .leaflet-popup-tip { background: #1a1d27; }
+    .leaflet-popup-tip { background: var(--bg-sidebar); }
 
-    .popup-title { font-weight: 700; font-size: 1rem; margin-bottom: 0.4rem; }
+    .popup-title {
+      font-weight: 700;
+      font-size: 0.95rem;
+      color: var(--gold);
+      margin-bottom: 0.4rem;
+    }
 
-    .popup-row { font-size: 0.8rem; margin-bottom: 0.15rem; }
-    .popup-row span { color: #a0aec0; }
+    .popup-row { font-size: 0.78rem; margin-bottom: 0.12rem; }
+    .popup-row span { color: var(--text-muted); }
 
-    .popup-links { margin-top: 0.6rem; display: flex; gap: 0.4rem; flex-wrap: wrap; }
+    .popup-links { margin-top: 0.55rem; display: flex; gap: 0.35rem; flex-wrap: wrap; }
 
     .popup-btn {
-      background: #2d3748;
-      color: #e2e8f0;
-      border: 1px solid #4a5568;
+      background: var(--bg-btn);
+      color: var(--text);
+      border: 1px solid var(--border);
       border-radius: 4px;
-      padding: 0.25rem 0.5rem;
-      font-size: 0.75rem;
+      padding: 0.22rem 0.45rem;
+      font-size: 0.72rem;
       text-decoration: none;
       cursor: pointer;
+      transition: background 0.1s, border-color 0.1s;
     }
-    .popup-btn:hover { background: #4a5568; }
 
-    /* ── Panel de descarga histórica ─────────────────────── */
+    .popup-btn:hover {
+      background: var(--accent-dim);
+      border-color: var(--accent);
+    }
+
+    /* ── Panel de descarga histórica ─────────────────────────── */
     #download-panel {
-      border-top: 2px solid #2d3748;
-      background: #13151f;
-      padding: 0.9rem 1rem;
+      border-top: 2px solid var(--accent-dim);
+      background: var(--bg-panel);
+      padding: 0.85rem 1rem;
       flex-shrink: 0;
     }
 
     #download-panel h2 {
-      font-size: 0.75rem;
+      font-size: 0.68rem;
       text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: #718096;
-      margin-bottom: 0.7rem;
+      letter-spacing: 0.1em;
+      color: var(--accent);
+      margin-bottom: 0.65rem;
       border: none;
       padding: 0;
     }
 
     .dp-label {
-      font-size: 0.72rem;
-      color: #a0aec0;
+      font-size: 0.7rem;
+      color: var(--text-muted);
       display: block;
-      margin-bottom: 0.2rem;
+      margin-bottom: 0.18rem;
     }
 
-    .dp-field { margin-bottom: 0.6rem; }
+    .dp-field { margin-bottom: 0.55rem; }
 
     .dp-select, .dp-input {
       width: 100%;
-      background: #1a1d27;
-      border: 1px solid #2d3748;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
       border-radius: 5px;
-      color: #e2e8f0;
-      padding: 0.35rem 0.5rem;
-      font-size: 0.8rem;
+      color: var(--text);
+      padding: 0.32rem 0.5rem;
+      font-size: 0.78rem;
       outline: none;
+      transition: border-color 0.15s;
     }
-    .dp-select:focus, .dp-input:focus { border-color: #4a90e2; }
 
-    /* Botones de hora disponible */
+    .dp-select:focus,
+    .dp-input:focus { border-color: var(--border-focus); }
+
+    /* Botones de hora */
     #hour-grid {
       display: flex;
       flex-wrap: wrap;
-      gap: 0.3rem;
-      min-height: 28px;
+      gap: 0.28rem;
+      min-height: 26px;
     }
 
     .hour-btn {
-      background: #2d3748;
-      border: 1px solid #4a5568;
+      background: var(--bg-btn);
+      border: 1px solid var(--border);
       border-radius: 4px;
-      color: #e2e8f0;
-      padding: 0.2rem 0.45rem;
-      font-size: 0.78rem;
+      color: var(--text);
+      padding: 0.18rem 0.42rem;
+      font-size: 0.76rem;
       cursor: pointer;
       transition: background 0.1s, border-color 0.1s;
     }
-    .hour-btn:hover   { background: #3a4a5c; }
-    .hour-btn.active  { background: #2b6cb0; border-color: #4299e1; color: #fff; }
+
+    .hour-btn:hover { background: var(--accent-dim); border-color: var(--accent); }
+
+    .hour-btn.active {
+      background: var(--accent);
+      border-color: var(--accent-h);
+      color: #fff;
+      font-weight: 600;
+    }
 
     #hour-hint {
-      font-size: 0.7rem;
-      color: #718096;
+      font-size: 0.68rem;
+      color: var(--text-dim);
       font-style: italic;
     }
 
     /* Radio de formato */
-    .format-group {
-      display: flex;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-    }
+    .format-group { display: flex; gap: 0.4rem; flex-wrap: wrap; }
 
     .fmt-label {
       display: flex;
       align-items: center;
-      gap: 0.25rem;
-      font-size: 0.78rem;
+      gap: 0.22rem;
+      font-size: 0.76rem;
       cursor: pointer;
-      padding: 0.25rem 0.5rem;
-      border: 1px solid #2d3748;
+      padding: 0.22rem 0.45rem;
+      border: 1px solid var(--border);
       border-radius: 4px;
-      transition: border-color 0.1s;
+      transition: border-color 0.1s, background 0.1s;
+      color: var(--text);
     }
-    .fmt-label:has(input:checked) { border-color: #4299e1; background: #1a3254; }
 
-    /* Botón de descarga */
+    .fmt-label:has(input:checked) {
+      border-color: var(--accent);
+      background: var(--accent-dim);
+      color: #fff;
+    }
+
+    /* Botón ZIP */
     #btn-download-zip {
       width: 100%;
-      margin-top: 0.7rem;
-      padding: 0.5rem;
-      background: #276749;
+      margin-top: 0.6rem;
+      padding: 0.48rem;
+      background: var(--accent);
       border: none;
       border-radius: 5px;
       color: #fff;
-      font-size: 0.85rem;
+      font-size: 0.82rem;
       font-weight: 600;
       cursor: pointer;
+      letter-spacing: 0.03em;
       transition: background 0.15s;
     }
-    #btn-download-zip:hover:not(:disabled) { background: #2f855a; }
-    #btn-download-zip:disabled { background: #2d3748; color: #718096; cursor: not-allowed; }
+
+    #btn-download-zip:hover:not(:disabled) { background: var(--accent-h); }
+
+    #btn-download-zip:disabled {
+      background: var(--bg-btn);
+      color: var(--text-dim);
+      cursor: not-allowed;
+    }
 
     #download-status {
-      font-size: 0.7rem;
-      color: #a0aec0;
-      margin-top: 0.3rem;
+      font-size: 0.68rem;
+      color: var(--text-muted);
+      margin-top: 0.28rem;
       min-height: 1rem;
       text-align: center;
     }
+
+    /* ── Scrollbar sutil ─────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: var(--bg-sidebar); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--accent-dim); }
   </style>
 </head>
 <body>
 
+  <!-- ── Header ──────────────────────────────────────────────────────────── -->
   <header>
-    <h1>PANdeMaiz <span>Quake</span> — Red Sísmica UdeA / GICM</h1>
-    <div id="status-bar">Conectando…</div>
+    <!-- Marca PANdeMaiz -->
+    <div class="header-brand">
+      <img src="/logos/PANdemaizlogo.png" alt="PANdeMaiz Quake" />
+      <div class="brand-text">
+        <h1>
+          <span class="pan">PANdeMaiz</span> <span class="quake">Quake</span>
+        </h1>
+        <p>Red Sísmica Distribuida</p>
+      </div>
+    </div>
+
+    <!-- Logos institucionales + status -->
+    <div class="header-right">
+      <div class="inst-logos">
+        <img src="/logos/logosimbolo-vertical.png" alt="Universidad de Antioquia" />
+        <div class="inst-divider"></div>
+        <img src="/logos/gicm_logo.png" alt="GICM" />
+      </div>
+      <div id="status-bar">Conectando…</div>
+    </div>
   </header>
 
+  <!-- ── Banner de alerta global ─────────────────────────────────────────── -->
   <div id="global-alert-banner">⚠ ALERTA SÍSMICA GLOBAL DETECTADA</div>
 
+  <!-- ── Cuerpo ───────────────────────────────────────────────────────────── -->
   <main>
     <div id="sidebar">
       <h2>Estaciones</h2>
       <div id="station-list"></div>
 
-      <!-- ── Panel de descarga histórica ─────────────────── -->
+      <!-- Panel de descarga histórica -->
       <div id="download-panel">
         <h2>↓ Descarga Histórica</h2>
 
-        <!-- Estación -->
         <div class="dp-field">
           <label class="dp-label" for="sel-station">Estación</label>
           <select id="sel-station" class="dp-select">
@@ -294,13 +463,11 @@
           </select>
         </div>
 
-        <!-- Fecha -->
         <div class="dp-field">
           <label class="dp-label" for="sel-date">Fecha</label>
           <input id="sel-date" type="date" class="dp-input" />
         </div>
 
-        <!-- Horas disponibles -->
         <div class="dp-field">
           <label class="dp-label">Hora disponible</label>
           <div id="hour-grid">
@@ -308,7 +475,6 @@
           </div>
         </div>
 
-        <!-- Formato de salida -->
         <div class="dp-field">
           <label class="dp-label">Formato de salida</label>
           <div class="format-group">
@@ -327,13 +493,11 @@
         <button id="btn-download-zip" disabled>Descargar ZIP</button>
         <div id="download-status"></div>
       </div>
-      <!-- ── fin panel ──────────────────────────────────── -->
     </div>
 
     <div id="map"></div>
   </main>
 
-  <!-- Leaflet JS -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="app.js"></script>
 </body>

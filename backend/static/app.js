@@ -16,8 +16,9 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
 }).addTo(map);
 
 // ── Estado local ──────────────────────────────────────────────────────────────
-const markers = {};        // station_id → L.Marker
+const markers = {};          // station_id → L.Marker
 let   globalAlertActive = false;
+let   stationsData = [];     // copia del último fetch; usada por el panel de descarga
 
 // ── Iconos ────────────────────────────────────────────────────────────────────
 function makeIcon(color) {
@@ -35,9 +36,10 @@ function makeIcon(color) {
   });
 }
 
-const ICON_GREEN = makeIcon("#48bb78");
-const ICON_RED   = makeIcon("#fc4444");
-const ICON_GREY  = makeIcon("#718096");
+// Colores alineados con la paleta de los logos institucionales
+const ICON_GREEN = makeIcon("#006837");   // Verde UdeA
+const ICON_RED   = makeIcon("#9b1c1c");   // Rojo sísmico PANdeMaiz
+const ICON_GREY  = makeIcon("#3a5a40");   // Verde oscuro apagado
 
 // ── Construcción del popup ────────────────────────────────────────────────────
 function buildPopup(s) {
@@ -118,13 +120,14 @@ function updateStations(stations) {
   banner.style.display = anyAlert ? "block" : "none";
   globalAlertActive = anyAlert;
 
-  // Sincronizar dropdown del panel de descarga histórica
+  // Guardar referencia y sincronizar dropdown del panel de descarga histórica
+  stationsData = stations;
   syncStationDropdown(stations);
 }
 
 function focusStation(stationId, lat, lon) {
   if (!lat && !lon) return;
-  map.setView([lat, lon], 12);
+  map.setView([lat, lon], 30);
   const m = markers[stationId];
   if (m) m.openPopup();
 }
@@ -288,6 +291,13 @@ btnDownload.addEventListener("click", async () => {
 });
 
 // ── Listeners del formulario ──────────────────────────────────────────────────
-selStation.addEventListener("change", fetchAvailableHours);
-selDate.addEventListener("change",    fetchAvailableHours);
+selStation.addEventListener("change", () => {
+  fetchAvailableHours();
+
+  // Zoom al marcador de la estación seleccionada
+  const s = stationsData.find((x) => x.station_id === selStation.value);
+  if (s && (s.lat || s.lon)) focusStation(s.station_id, s.lat, s.lon);
+});
+
+selDate.addEventListener("change", fetchAvailableHours);
 
