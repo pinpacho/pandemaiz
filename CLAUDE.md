@@ -4,11 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-PANdeMaiz Quake is a portable distributed seismic early-warning network. It has three subsystems:
+PANdeMaiz Quake is a portable distributed seismic early-warning network. It has four subsystems:
 
 1. **Firmware** (`platform_acel/acel_ubuntu/`) — ESP32 (TTGO LILYGO T3 V1.6.1) + ADXL345 accelerometer, built with PlatformIO. Records filtered acceleration to SD card in a custom binary format and runs TFLite Micro inference on-device.
 2. **Data pipeline** (`Data_Labeling/`) — Python/Jupyter notebooks that convert raw `.bin` (from the sensor) and `.anc` (from Colombia's SGC seismological service) into labeled spectrograms (`.npy`) used to train the CNN.
 3. **ML** (`ML/`) — Keras notebook that trains a 1D-CNN classifier and exports it to TFLite INT8 + C header files ready to embed in the firmware.
+4. **Backend** (`backend/`) — FastAPI server that listens to Firebase RTDB for seismic alerts from all stations, runs a distributed consensus engine, fires multi-channel notifications, and serves a Leaflet.js dashboard for monitoring.
 
 ## Environment setup
 
@@ -77,7 +78,7 @@ This is the canonical notebook. Do not modify `v2` — it is kept as reference.
 - `DatosObtenidos/PANAcelerografo/<env>/` — `.bin` files → labeled Class 0 (ambient noise)
 - `DatosObtenidos/Acelerografo_SGC/<event>/` — `.anc` SGC files → labeled via STA/LTA (Class 0 or 1)
 
-**Output shape:** `(65, 12, 3) float32`, `log10(PSD + 1e-12)` in g²/Hz, axes order EW/VER/NS.
+**Output shape:** `(65, 11, 3) float32`, `log10(PSD + 1e-12)` in g²/Hz, axes order EW/VER/NS. (Note: the firmware pipeline and ML trainer both use 11 time windows; the number of frequency bins is 65 = FFT128/2 + 1.)
 
 **STA/LTA parameters** (must stay identical between notebook and firmware):
 
@@ -123,10 +124,70 @@ The output `.bin` includes 20 s of synthetic noise (LTA warmup) followed by up t
 
 **Column mapping** (`.anc` → firmware axes): EW→ax, NS→ay, VER→az.
 
+## Backend (`backend/`)
+
+FastAPI server that bridges Firebase RTDB → consensus engine → multi-channel alerting. Run from inside `backend/`:
+
+```bash
+# Local dev (auto-reload)
+uvicorn app.main:app --reload
+
+# Docker (production)
+docker-compose up --build
+```
+
+Credentials go in `backend/.env` — copy from `.env.example`. The Docker volume mounts `firebase.json` (service account key) as `/run/secrets/firebase.json:ro`.
+
+**Architecture:**
+
+```
+Firebase RTDB /alertas  (SSE listener in daemon thread)
+  → asyncio.run_coroutine_threadsafe → ConsensusEngine.record_alert()
+       → if ≥ MIN_STATIONS in CONSENSUS_WINDOW_S:
+           → notifier.fire_global_alert()  (email + Discord + Telegram in parallel)
+
+Routers:
+  stations.py   GET /api/stations                          → estaciones snapshot
+  alerts.py     GET /api/alerts                            → últimas alertas
+  download.py   GET /download?station_id=&file=&format=    → proxy .bin → bin/mseed/anc
+  history.py    GET /api/v1/estaciones/{id}/disponibilidad → horas con datos
+                GET /api/v1/download-hour?...              → ZIP de una hora
+
+Static:
+  /logos  → backend/logos/
+  /       → backend/static/ (Leaflet.js dashboard)
+```
+
+**Firebase RTDB node schema:**
+```
+/estaciones/{station_id}/
+    status/ip           ← IP local del ESP32 (para proxy de descarga)
+    logs_acel/{YYYY}/{YYYY-MM}/{YYYY-MM-DD}/{HH}/{key}
+        archivo, url, lat, lon, timestamp
+/alertas/{station_id}/{YYYY}/{YYYY-MM}/{YYYY-MM-DD}/{HH}/{ts}
+    score, lat, lon, estacion, timestamp
+```
+
+**Consensus settings** (tunable via `.env`):
+
+| Param | Default | Description |
+|-------|---------|-------------|
+| `CONSENSUS_WINDOW_S` | 30 | Seconds to aggregate alerts across stations |
+| `MIN_STATIONS` | 2 | Minimum stations to trigger global alert |
+| `GLOBAL_ALERT_COOLDOWN_S` | 300 | Minimum interval between global alerts |
+
+**Notification channels** — all optional; channels without credentials are silently skipped:
+- Email: `SMTP_USER` + `SMTP_PASS` + `SMTP_RECIPIENTS` (CSV)
+- Discord: `DISCORD_WEBHOOK_URL`
+- Telegram: `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`
+
+**`converter.py`** — shared `.bin` parser used by both routers and `anc_to_sim.py`. Exposes `parse_bin()`, `bin_to_mseed()`, `bin_to_anc()`. MiniSEED channels use FDSN convention: `HNE=ax (EW)`, `HNN=ay (NS)`, `HNZ=az (VER)`. The generated `.anc` header has exactly 20 lines — required for compatibility with `parse_anc()` in the dataset notebook.
+
 ## Data not in git
 
 The following are gitignored and must be obtained separately:
 - `Data_Labeling/DatosObtenidos/` — raw `.anc` SGC files and `.bin` sensor captures
 - `Data_Labeling/Dataset/0_Ruido/*.npy` and `1_Sismo/*.npy` — generated spectrograms
-- `platform_acel/acel_ubuntu/.env` — device credentials
+- `platform_acel/acel_ubuntu/.env` — firmware credentials
+- `backend/.env` — backend credentials and Firebase service account JSON
 - `*.bin` binary recordings

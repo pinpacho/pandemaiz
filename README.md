@@ -1,103 +1,98 @@
-# PANdeMaiz Quake
+# PANdeMaiz Quake — Red Acelerográfica Portátil de Alerta Temprana con IoT y Machine Learning
 
-Red acelerográfica portátil y distribuida para la detección y alerta temprana de sismos.
-Desarrollada como trabajo de grado en la Universidad de Antioquia — Grupo GICM.
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
+![PlatformIO](https://img.shields.io/badge/PlatformIO-ESP32-F5822A?logo=platformio&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-009688?logo=fastapi&logoColor=white)
+![TFLite](https://img.shields.io/badge/TFLite-INT8-FF6F00?logo=tensorflow&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green)
+
+PANdeMaiz Quake es una red distribuida de nodos acelerométricos de bajo costo para la detección y alerta temprana de sismos. Cada nodo integra un microcontrolador ESP32 con un acelerómetro ADXL345 que registra aceleración del suelo a 200 Hz, aplica un filtro paso-banda Butterworth (0.1–20 Hz) y ejecuta un clasificador de redes neuronales convolucionales directamente en el dispositivo (Edge AI). Cuando múltiples nodos detectan un evento de forma simultánea, un motor de consenso distribuido en la nube dispara alertas multicanal (Email, Discord, Telegram) y actualiza un dashboard cartográfico en tiempo real.
 
 ---
 
 ## Arquitectura del sistema
 
 ```
-[Nodo ESP32 + ADXL345]
-        |
-        | (Wi-Fi / Firebase)
-        v
-[Firebase Realtime DB]
-        |
-        v
-[API FastAPI + uvicorn]
-        |
-   ┌────┴────┐
-   |         |
-[Dashboard] [Alertas]
- Mapa calor  Gmail/Discord
+┌─────────────────────────────────────────────────────┐
+│             CAPA DE ADQUISICIÓN (Edge)               │
+│  [ESP32 + ADXL345]  →  Filtrado → SD card (.bin)    │
+│       ↓ STA/LTA trigger                              │
+│  [TFLite INT8 CNN]  →  score > 0.05 → Firebase      │
+└──────────────────────────┬──────────────────────────┘
+                           │  Wi-Fi / Firebase RTDB
+┌──────────────────────────▼──────────────────────────┐
+│               CAPA DE PROCESAMIENTO                  │
+│  [Firebase RTDB /alertas]  ←  múltiples nodos       │
+│       ↓ SSE listener (FastAPI backend)               │
+│  [Motor de Consenso]  →  ≥2 estaciones en 30 s      │
+│       ↓ alerta global                                │
+│  [Notificador]  →  Email + Discord + Telegram        │
+└──────────────────────────┬──────────────────────────┘
+                           │  API REST
+┌──────────────────────────▼──────────────────────────┐
+│                CAPA DE VISUALIZACIÓN                 │
+│  [Dashboard Leaflet.js]  →  pines verde/rojo         │
+│  [Descarga histórica]    →  ZIP bin/anc/mseed        │
+└─────────────────────────────────────────────────────┘
 ```
-
-### Componentes
-
-| Módulo | Tecnología | Estado |
-|--------|-----------|--------|
-| Firmware nodo | ESP32 / C++ / PlatformIO | En desarrollo |
-| Dataset ML | Python / ObsPy / SciPy | En desarrollo |
-| Modelo edge | TensorFlow Lite / 1D-CNN | Pendiente |
-| Backend API | FastAPI / uvicorn | Pendiente |
-| Base de datos | Firebase Realtime DB | Pendiente |
 
 ---
 
-## Hardware del nodo
+## Subsistemas
 
-- **MCU:** TTGO LILYGO T3 V1.6.1 (ESP32)
-- **Acelerómetro:** ADXL345 (I2C, ODR=200 Hz, ±2g full-res)
-- **GPS:** Neo 6M
-- **Almacenamiento:** MicroSD
-- **Display:** OLED SSD1306 128×64
-
-### Pipeline de señal (200 Hz)
-
-```
-ADXL345 → burst 6 bytes → ax/ay/az (int16)
-  → calibración bias (2s en reposo)
-  → Filtro Biquad HP 0.1 Hz (Butterworth DF2T)
-  → Filtro Biquad LP 20 Hz  (Butterworth DF2T)
-  → SD card (.bin propio)
-```
-
-### Formato binario `.bin`
-
-| Campo | Tamaño | Descripción |
-|-------|--------|-------------|
-| MAGIC | 4 bytes | `0xDA7A1345` |
-| Version | 2 bytes | `0x0002` |
-| Sample rate | 2 bytes | `200` Hz |
-| Timestamp ms | 4 bytes | por muestra |
-| ax / ay / az | 2+2+2 bytes | int16, LSB=3.9 mg |
+| Subsistema | Carpeta | README |
+|------------|---------|--------|
+| Firmware ESP32 | `platform_acel/acel_ubuntu/` | [README](platform_acel/acel_ubuntu/README.md) |
+| Pipeline de datos | `Data_Labeling/` | [README](Data_Labeling/README.md) |
+| Entrenamiento ML | `ML/` | [README](ML/README.md) |
+| Backend API + Consenso | `backend/` | [README](backend/README.md) |
+| Dashboard + Conversión | `backend/static/` | [README](backend/static/README.md) |
 
 ---
 
-## Pipeline de datos ML
+## Requisitos mínimos de despliegue
 
-### Fuentes de datos
+| Componente | Requisito |
+|------------|-----------|
+| Python | 3.11+ |
+| PlatformIO | CLI o extensión VS Code |
+| Docker + Compose | v24+ |
+| Firebase | Proyecto con RTDB habilitado |
+| Hardware nodo | TTGO LILYGO T3 V1.6.1, ADXL345, MicroSD |
+| SO host (backend) | Linux/macOS/Windows con Docker |
 
-- **Ruido ambiental** → archivos `.bin` del ADXL345 (capturas en campo: calle, parque)
-- **Eventos sísmicos** → archivos `.anc` del SGC (Servicio Geológico Colombiano), 2023–2026
+---
 
-### Detección automática (STA/LTA)
+## Quickstart global
 
-| Parámetro | Valor |
-|-----------|-------|
-| Ventana corta (STA) | 0.5 s |
-| Ventana larga (LTA) | 10.0 s |
-| Umbral ON | 2.5 |
-| Umbral OFF | 1.5 |
-| Overlap mínimo | 30% de ventana |
+### 1 — Firmware
 
-### Espectrograma de salida
-
-```
-Ventana temporal: 4 s (configurable)
-Shape: (65, 11, 3) float32
-  65  = bins de frecuencia (0–100 Hz)
-  11  = bins de tiempo  [= 1 + (WIN_SAMPLES - NPERSEG) // (NPERSEG - NOVERLAP)]
-  3   = canales (EW, VER, NS)
-Escala: log10(PSD + 1e-12)
+```bash
+cd platform_acel/acel_ubuntu
+cp .env.example .env          # completar WiFi + Firebase
+pio run --target upload       # compilar y flashear
+pio run --target monitor      # monitor serie 115200 baud
 ```
 
-### Augmentación (v3)
+### 2 — Pipeline de datos + entrenamiento
 
-- Ruido gaussiano (σ del sensor real)
-- Desplazamiento temporal circular (±0.2 s)
-- Escalado de amplitud (×0.7 – ×1.3)
+```bash
+source pan_env/bin/activate   # o: uv venv pan_env && source pan_env/bin/activate
+                               #    uv pip install -r requirements.txt
+jupyter lab                   # abrir seismic_dataset_builder_v3.ipynb → Run All
+                               # luego ML/seismic_cnn_trainer.ipynb → Run All
+cp ML/models/model.h          platform_acel/acel_ubuntu/src/model.h
+cp ML/models/norm_constants.h platform_acel/acel_ubuntu/src/norm_constants.h
+```
+
+### 3 — Backend
+
+```bash
+cd backend
+cp .env.example .env          # completar Firebase + canales de alerta
+# copiar firebase.json (cuenta de servicio) a backend/
+docker-compose up --build     # expone http://localhost:8000
+```
 
 ---
 
@@ -106,62 +101,52 @@ Escala: log10(PSD + 1e-12)
 ```
 PANdeMaiz/
 ├── platform_acel/
-│   └── acel_ubuntu/          # Firmware ESP32 (PlatformIO)
+│   └── acel_ubuntu/              # Firmware ESP32 (PlatformIO)
 │       ├── src/
-│       │   ├── main.cpp
-│       │   └── config.h
-│       └── platformio.ini
+│       │   ├── main.cpp          # Loop principal, ISR, TFLite inference
+│       │   ├── config.h          # Todos los parámetros DSP y pines
+│       │   ├── model.h           # Modelo TFLite embebido (generado)
+│       │   └── norm_constants.h  # Media/std para normalización (generado)
+│       ├── platformio.ini
+│       ├── load_env.py           # Pre-script inyección de credenciales
+│       └── .env.example
 ├── Data_Labeling/
-│   ├── DatosObtenidos/
-│   │   ├── Acelerografo_SGC/ # .anc del SGC (2023–2026)
-│   │   └── PANAcelerografo/  # .bin del sensor (calle, parque…)
-│   ├── Dataset/
-│   │   ├── 0_Ruido/          # .npy espectrogramas ruido
-│   │   └── 1_Sismo/          # .npy espectrogramas sismo
+│   ├── seismic_dataset_builder_v3.ipynb  # Notebook canónico
 │   ├── seismic_dataset_builder_v2.ipynb  # Referencia (no modificar)
-│   └── seismic_dataset_builder_v3.ipynb  # Versión actual
-├── requirements.txt
-├── .gitignore
+│   ├── anc_to_sim.py                     # Convertidor .anc → .bin simulación
+│   ├── DatosObtenidos/                   # Raw data (gitignored)
+│   └── Dataset/                          # Espectrogramas .npy (gitignored)
+├── ML/
+│   ├── seismic_cnn_trainer.ipynb         # Entrenamiento + exportación TFLite
+│   └── models/                           # best_model.keras, *.tflite, *.h
+├── backend/
+│   ├── app/
+│   │   ├── main.py               # FastAPI app + lifespan Firebase
+│   │   ├── consensus.py          # Motor de consenso cooperativo
+│   │   ├── firebase.py           # RTDB helpers + SSE listener
+│   │   ├── notifier.py           # Email + Discord + Telegram
+│   │   ├── converter.py          # parse_bin, bin_to_anc, bin_to_mseed
+│   │   └── routers/              # stations, alerts, download, history
+│   ├── static/                   # Dashboard Leaflet.js
+│   ├── docker-compose.yml
+│   ├── Dockerfile
+│   └── .env.example
+├── requirements.txt              # Entorno Python (datos + ML)
 └── README.md
 ```
 
 ---
 
-## Configuración del entorno
+## Contacto
 
-```bash
-# Instalar uv (si no está disponible)
-curl -LsSf https://astral.sh/uv/install.sh | sh
+**Julian Francisco Pinchao Ortiz**
+jfrancisco.pinchao@udea.edu.co
 
-# Crear entorno y instalar dependencias
-uv venv pan_env
-source pan_env/bin/activate
-uv pip install -r requirements.txt
+Scientific Instrumentation and Microelectronics Research Group — GICM
 
-# Registrar kernel en Jupyter
-python -m ipykernel install --user --name pandemaiz --display-name "PANdeMaiz"
+Physics Institute, Exact and Natural Sciences Faculty
 
-# Lanzar JupyterLab
-jupyter lab
-```
-
-> **Nota para ObsPy en Linux:** si la instalación falla, ejecutar primero:
-> `sudo apt-get install -y libxml2-dev libxslt-dev`
+Universidad de Antioquia UdeA
 
 ---
 
-## Hoja de ruta
-
-- [x] Firmware básico ESP32 (ADXL345 + SD + OLED + Web server)
-- [x] Pipeline de etiquetado v2 (STA/LTA sobre .anc SGC)
-- [ ] Dataset balanceado v3 (ruido ambiental + augmentación ampliada)
-- [ ] Modelo 1D-CNN / CNN optimizado para TFLite (<300 KB)
-- [ ] Integración GPS Neo 6M en firmware
-- [ ] Backend FastAPI + Firebase (dashboard + alertas)
-
----
-
-## Créditos
-
-Universidad de Antioquia — Grupo de Investigación GICM  
-Datos sísmicos: Servicio Geológico Colombiano (SGC)
