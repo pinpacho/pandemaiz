@@ -14,7 +14,7 @@ constexpr float SEISMIC_FS         = 200.0f;
 
 // Umbral de clasificacion (score > THRESHOLD -> sismo)
 // Calibrado sobre validation set: maximiza F1_sismo con recall>=0.90
-constexpr float SEISMIC_THRESHOLD  = 0.05f;
+constexpr float SEISMIC_THRESHOLD  = 0.50f;
 
 // PGA normalization — por eje, calculado sobre train set
 // Generado por seismic_cnn_trainer.ipynb; reemplazar tras re-entrenar.

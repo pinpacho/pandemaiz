@@ -26,14 +26,19 @@ else:
             key = key.strip()
             val = val.strip()
 
-            # Valores enteros (ej: MQTT_PORT=1883) → sin comillas C
+            # Valores enteros (ej: MQTT_PORT=1883)   → sin comillas C
+            # Valores float   (ej: STATIC_LAT=6.26) → literal con sufijo f
+            # Cadenas         (ej: WIFI_SSID=MiRed)  → comillas C escapadas
             try:
                 int(val)
                 flag = f"-D{key}={val}"
             except ValueError:
-                # Cadena (incluso vacía) → envolver en comillas C escapadas
-                escaped = val.replace("\\", "\\\\").replace('"', '\\"')
-                flag = f'-D{key}=\\"{escaped}\\"'
+                try:
+                    float(val)
+                    flag = f"-D{key}={val}f"
+                except ValueError:
+                    escaped = val.replace("\\", "\\\\").replace('"', '\\"')
+                    flag = f'-D{key}=\\"{escaped}\\"'
 
             env.Append(CCFLAGS=[flag])  # noqa: F821
             count += 1

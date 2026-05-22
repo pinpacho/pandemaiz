@@ -232,21 +232,26 @@ static void bandpass_init(float ax0, float ay0, float az0) {
                   (double)BP_HP_FREQ_HZ, (double)BP_LP_FREQ_HZ, SAMPLE_RATE_HZ);
 }
 
-// Aplica el filtro paso-banda (HP → LP) a los tres ejes en una sola llamada.
-// Entrada:  ax_in, ay_in, az_in  — valores en LSB (float, post-bias)
-// Salida:   ax_out, ay_out, az_out — señal filtrada, truncada a int16_t
+// Aplica HP → LP en cascada para los tres ejes.
+// Salida HP:  sin DC, con piso de ruido 0.1–100 Hz — para CNN (igual que training)
+// Salida LP:  sin DC, sin HF                        — para SD card y STA/LTA
 //
-// Costo computacional @ 240 MHz:
-//   6 biquads × ~10 FPU ops = ~60 FPU ops ≈ 0.25 µs → despreciable vs I2C
+// El training usó adxl345ify() sin LP, por lo que el modelo espera ver el
+// piso de ruido del ADXL345 en toda la banda (0.1–100 Hz).  Pasar LP elimina
+// esas frecuencias y el espectrograma parece clase-0 → score 0.  Solución:
+// buffer CNN usa HP-only; SD card y STA/LTA usan HP+LP.
 static void bandpassFilter(float ax_in, float ay_in, float az_in,
-                           int16_t &ax_out, int16_t &ay_out, int16_t &az_out) {
-    float inputs[3]  = { ax_in, ay_in, az_in };
-    int16_t *outs[3] = { &ax_out, &ay_out, &az_out };
+                           int16_t &ax_hp_out, int16_t &ay_hp_out, int16_t &az_hp_out,
+                           int16_t &ax_lp_out, int16_t &ay_lp_out, int16_t &az_lp_out) {
+    float inputs[3]    = { ax_in, ay_in, az_in };
+    int16_t *hp_outs[3] = { &ax_hp_out, &ay_hp_out, &az_hp_out };
+    int16_t *lp_outs[3] = { &ax_lp_out, &ay_lp_out, &az_lp_out };
 
     for (int i = 0; i < 3; i++) {
         float hp = biquad_process(g_bq_hp[i], inputs[i]);   // quita DC
-        float bp = biquad_process(g_bq_lp[i], hp);          // quita HF
-        *outs[i] = (int16_t)bp;
+        float lp = biquad_process(g_bq_lp[i], hp);          // quita HF
+        *hp_outs[i] = (int16_t)hp;
+        *lp_outs[i] = (int16_t)lp;
     }
 }
 
@@ -672,6 +677,23 @@ static float run_inference() {
     _spec_axis(g_win_az, 1);   // canal 1: VER (az)
     _spec_axis(g_win_ay, 2);   // canal 2: NS  (ay)
 
+    // Diagnóstico: media del log10-PSD crudo antes de normalizar.
+    // Distribución de entrenamiento: media=-7.989, std=1.374.
+    // Cuantización ADXL345 quieto → media≈-12.0 (fuera de distribución).
+    float spec_mean = 0.0f;
+    for (int f = 0; f < SEISMIC_FREQ_BINS; f++)
+        for (int t = 0; t < SEISMIC_TIME_BINS; t++)
+            for (int c = 0; c < 3; c++)
+                spec_mean += g_spec[f][t][c];
+    spec_mean /= (SEISMIC_FREQ_BINS * SEISMIC_TIME_BINS * 3);
+    Serial.printf("[CNN] spec_mean_log=%.3f  pga=%.4f,%.4f,%.4f g\n",
+                  spec_mean, pga[0], pga[1], pga[2]);
+    if (spec_mean < CNN_MIN_LOG_PSD) {
+        Serial.printf("[CNN] señal debajo de umbral (%.3f < %.1f) — inferencia omitida\n",
+                      spec_mean, CNN_MIN_LOG_PSD);
+        return 0.0f;
+    }
+
     // TFLite pone PGA como input(0) y espectrograma como input(1)
     // (orden determinado por get_input_details() tras model.export())
     float* inp_pga = g_tflite_interp->input(0)->data.f;
@@ -824,6 +846,7 @@ static void upload_task(void* param) {
 
     UploadReq req;
     uint32_t fb_retry_ms = 1000;
+    uint32_t lastStatusMs = 0;
     for (;;) {
         if (!Firebase.ready()) {
             vTaskDelay(pdMS_TO_TICKS(fb_retry_ms));
@@ -832,6 +855,27 @@ static void upload_task(void* param) {
             continue;
         }
         fb_retry_ms = 1000;
+
+        // Actualizar status (IP + GPS) cada 150 s
+        if ((uint32_t)(millis()) - lastStatusMs >= 150000) {
+            lastStatusMs = (uint32_t)(millis());
+            char ip[20];
+            strncpy(ip, WiFi.localIP().toString().c_str(), sizeof(ip) - 1);
+            ip[sizeof(ip) - 1] = '\0';
+            char key[80];
+            snprintf(key, sizeof(key), "/estaciones/%s/status", g_station_id);
+            FirebaseJson j;
+            j.set("estado",    "Conectada");
+            j.set("ip",        ip);
+            j.set("lat",       g_gps_lat);
+            j.set("lon",       g_gps_lon);
+            time_t now_t; time(&now_t);
+            j.set("timestamp", (int)now_t);
+            bool ok = Firebase.RTDB.setJSON(&g_fbdo, key, &j);
+            Serial.printf("[RTDB] Status GPS actualizado (%.5f,%.5f): %s\n",
+                          g_gps_lat, g_gps_lon, ok ? "OK" : g_fbdo.errorReason().c_str());
+        }
+
         if (xQueueReceive(g_upload_queue, &req, pdMS_TO_TICKS(200)) == pdTRUE) {
             if (req.is_event) firebase_alert_rtdb(req);
             rtdb_log_file(req);
@@ -1031,12 +1075,21 @@ static void connectWiFi() {
         Serial.print("[NTP] Sincronizando");
         struct tm ti;
         uint8_t ntpRetry = 0;
-        while (!getLocalTime(&ti, 1000) && ntpRetry++ < 10) {
+        bool ntpOk = false;
+        while (ntpRetry++ < 30) {          // hasta 30 s (algunas redes son lentas)
+            if (getLocalTime(&ti, 1000) && ti.tm_year > 100) {
+                ntpOk = true;              // año > 2000: sync real, no epoch 0
+                break;
+            }
             Serial.print(".");
         }
-        Serial.printf("\n[NTP] ✓ Hora: %04d-%02d-%02d %02d:%02d:%02d\n",
-                      ti.tm_year+1900, ti.tm_mon+1, ti.tm_mday,
-                      ti.tm_hour, ti.tm_min, ti.tm_sec);
+        if (ntpOk) {
+            Serial.printf("\n[NTP] ✓ Hora: %04d-%02d-%02d %02d:%02d:%02d\n",
+                          ti.tm_year+1900, ti.tm_mon+1, ti.tm_mday,
+                          ti.tm_hour, ti.tm_min, ti.tm_sec);
+        } else {
+            Serial.println("\n[NTP] ✗ Sin sincronización — archivos usarán millis().");
+        }
     } else {
         Serial.println("\n[WiFi] ✗ Sin conexión. Nombres de archivo usarán millis().");
     }
@@ -1576,14 +1629,24 @@ Serial.println("[OLED] ✓ Pantalla inicializada");
     // ── Crear directorios SD ──────────────────────────────
     ensure_sd_dirs();
 
-    // ── GPS Neo 6M (5 s timeout → 0.0, 0.0 si sin fix) ──
-    //gps_init();
+
 
     // ── TFLite Micro — cargar modelo + Hanning + FFT ─────
     seismic_inference_init();
 
     // ── WiFi y NTP ────────────────────────────────────────
     connectWiFi();
+    
+    // ── GPS Neo 6M (5 s timeout → 0.0, 0.0 si sin fix) ──
+    gps_init();
+    // Sin fix real: aplicar coordenadas estáticas del .env como posición provisional.
+    // gps_update() las reemplazará automáticamente cuando el módulo consiga señal.
+    if (!g_gps_valid && (STATIC_LAT != 0.0f || STATIC_LON != 0.0f)) {
+        g_gps_lat = STATIC_LAT;
+        g_gps_lon = STATIC_LON;
+        Serial.printf("[GPS] Sin fix — usando coords estáticas: %.6f, %.6f\n",
+                      g_gps_lat, g_gps_lon);
+    }
 
     // ── Fase 3: Identificación, mutex SD, cola y task de upload ──
     station_init();
@@ -1647,15 +1710,15 @@ void loop() {
     float ay_c = (float)ay_raw - g_sw_bias[1];
     float az_c = (float)az_raw - g_sw_bias[2];
 
-    // ── 3. Filtro paso-banda 0.1–20 Hz (HP→LP en cascada) ─
-    // Resultado en LSB de int16_t — misma escala que las crudas.
-    // Costo: ~6 multiplicaciones FPU ≈ 0.3 µs @ 240 MHz (< 0.006% del período)
-    int16_t ax_f, ay_f, az_f;
-    bandpassFilter(ax_c, ay_c, az_c, ax_f, ay_f, az_f);
+    // ── 3. Filtro HP→LP en cascada ────────────────────────
+    // ax_hp : solo HP (0.1 Hz) — piso de ruido 0.1–100 Hz intacto
+    //         para CNN: mismo espectro que adxl345ify() en training (sin LP)
+    // ax_f  : HP+LP (0.1–20 Hz) — para SD card y STA/LTA
+    int16_t ax_hp, ay_hp, az_hp;
+    int16_t ax_f,  ay_f,  az_f;
+    bandpassFilter(ax_c, ay_c, az_c, ax_hp, ay_hp, az_hp, ax_f, ay_f, az_f);
 
     // ── 4. Construir muestra y escribir en SD ─────────────
-    // El campo az_dynamic ahora contiene la señal BP del eje Z
-    // (en v1 contenía solo el resultado del filtro HP de gravedad)
     Sample s = {
         .timestamp_ms = millis(),
         .ax           = ax_f,
@@ -1665,10 +1728,7 @@ void loop() {
     writeSample(s);
 
     // ── 3b. STA/LTA energy detector (EMA inline) ──────────
-    // Activa inferencia CNN solo ante actividad sísmica potencial.
-    // τ_STA=0.5 s · τ_LTA=10 s — mismos parámetros que el builder Python.
-    // Reset de ventana en el onset asegura que el espectrograma
-    // siempre empieza en el momento del evento (= patrón de entrenamiento).
+    // Usa ax_f (HP+LP) — sensible solo a la banda sísmica 0.1–20 Hz.
     {
         float e = (float)ax_f*(float)ax_f
                 + (float)ay_f*(float)ay_f
@@ -1680,10 +1740,14 @@ void loop() {
         } else {
             float ratio = g_sta / g_lta;
             if (!g_sta_trig && ratio >= STA_LTA_ON) {
-                g_sta_trig = true;
-                g_win_ptr  = 0;                    // ventana fresca desde el onset
-                g_sta_hold = SEISMIC_WIN_SAMPLES;  // hold ≥ 1 ventana completa (4 s)
-                Serial.printf("[STA/LTA] TRIGGER  ratio=%.2f\n", ratio);
+                if (g_sta >= STA_LTA_MIN_STA) {
+                    g_sta_trig = true;
+                    g_win_ptr  = 0;                    // ventana fresca desde el onset
+                    g_sta_hold = SEISMIC_WIN_SAMPLES;  // hold ≥ 1 ventana completa (4 s)
+                    Serial.printf("[STA/LTA] TRIGGER  ratio=%.2f  sta=%.2e\n", ratio, g_sta);
+                } else {
+                    Serial.printf("[STA/LTA] ratio=%.2f suprimido (sta=%.2e < MIN)\n", ratio, g_sta);
+                }
             } else if (g_sta_trig) {
                 if (g_sta_hold > 0) {
                     --g_sta_hold;
@@ -1695,10 +1759,12 @@ void loop() {
         }
     }
 
-    // ── 5. Acumular ventana e inferencia CNN (solo si STA/LTA activo) ─────
-    g_win_ax[g_win_ptr] = ax_f;
-    g_win_ay[g_win_ptr] = ay_f;
-    g_win_az[g_win_ptr] = az_f;
+    // ── 5. Acumular ventana e inferencia CNN ──────────────
+    // Usa ax_hp (HP-only) — coincide con adxl345ify() en training:
+    // piso de ruido del ADXL345 visible en toda la banda (0.1–100 Hz).
+    g_win_ax[g_win_ptr] = ax_hp;
+    g_win_ay[g_win_ptr] = ay_hp;
+    g_win_az[g_win_ptr] = az_hp;
     if (++g_win_ptr >= SEISMIC_WIN_SAMPLES) {
         g_win_ptr = 0;
         if (g_sta_trig) {
@@ -1712,7 +1778,7 @@ void loop() {
     }
 
     // ── Actualizar GPS (no bloqueante) ────────────────────
-    //gps_update();
+    gps_update();
 
     // ── 6. Diagnóstico serial cada 5 segundos ─────────────
     static uint32_t lastPrint = 0;

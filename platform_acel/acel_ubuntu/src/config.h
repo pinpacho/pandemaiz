@@ -123,16 +123,36 @@
 #define WRITE_FLUSH_EVERY 200  // flush SD cada N muestras (~1 s a 200 Hz)
 
 // ---- GPS Neo 6M -------------------------------------------
-#define GPS_RX_PIN       16           // GPIO16 ← TX del Neo 6M
-#define GPS_TX_PIN       17           // GPIO17 → RX del Neo 6M
+// GPIO16 = OLED_RST en la TTGO T3 v1.6 → resetea el OLED si se usa como UART.
+// GPIO4  = libre (RX: recibe TX del Neo 6M)
+// GPIO25 = LED integrado (TX: envía al Neo 6M; LED parpadea a 9600 baud, imperceptible)
+#define GPS_RX_PIN        4           // GPIO4  ← TX del Neo 6M
+#define GPS_TX_PIN       25           // GPIO25 → RX del Neo 6M
 #define GPS_BAUD         9600
 #define GPS_TIMEOUT_MS   5000         // sin fix en 5 s → lat=0.0, lon=0.0
+
+// ---- Coordenadas estáticas (fallback sin GPS) ---------------
+// Definir en .env como STATIC_LAT y STATIC_LON (float, ej: 6.26649).
+// Se usan si gps_init() no obtiene fix; gps_update() las reemplaza
+// automáticamente en cuanto el módulo consiga señal real.
+// Si ambas son 0.0 no se aplica ningún fallback.
+#ifndef STATIC_LAT
+#define STATIC_LAT 0.0f
+#endif
+#ifndef STATIC_LON
+#define STATIC_LON 0.0f
+#endif
 
 // ---- Inferencia TFLite Micro ------------------------------
 #define SEISMIC_WIN_SAMPLES  800      // 4.0 s × 200 Hz
 #define SEISMIC_TIME_BINS    11       // 1 + (800-128)/64  (fórmula scipy)
 #define SEISMIC_FREQ_BINS    65       // nperseg/2 + 1
 #define TENSOR_ARENA_SIZE    (64 * 1024)
+// Media mínima del log10-PSD (promedio sobre todos los bins) para invocar la CNN.
+// Entrenamiento: media = -7.989, std = 1.374 → umbral = -11.0 ≈ media - 2.2σ.
+// Señal casi-cero (cuantización ADXL345) da media ≈ -12.0 → inferencia omitida.
+// Sismo mínimo detectable (>1 mg RMS) da media ≈ -8.8 → inferencia permitida.
+#define CNN_MIN_LOG_PSD  -11.0f
 
 // ---- STA/LTA trigger (mismos parámetros que seismic_dataset_builder_v3) ----
 // EMA (exponential moving average): evita ring buffer, 5 flops/muestra.
@@ -140,9 +160,13 @@
 // Warmup: 30 s para que g_lta converja (3×τ_LTA → error < 5 %).
 #define STA_SAMPLES    100      // 0.5 s @ 200 Hz
 #define LTA_SAMPLES    2000     // 10.0 s @ 200 Hz
-#define STA_LTA_ON     2.5f     // ratio para activar trigger
-#define STA_LTA_OFF    1.5f     // ratio para desactivar trigger
-#define STA_LTA_WARMUP 6000     // 30 s de calentamiento al arrancar
+#define STA_LTA_ON       2.5f    // ratio para activar trigger
+#define STA_LTA_OFF      1.5f    // ratio para desactivar trigger
+#define STA_LTA_WARMUP   6000    // 30 s de calentamiento al arrancar
+// Energía mínima del STA para que el trigger pueda activarse.
+// Equivale a ~0.7 mg RMS sostenidos durante 0.5 s.
+// Un pico de 1 LSB (3.9 mg) aislado solo eleva el STA ~1.5e-7 g² → insuficiente.
+#define STA_LTA_MIN_STA  5e-7f   // g² — guarda contra falsos positivos por cuantización
 
 // ---- Rutas SD (logger dual) --------------------------------
 #define SD_DIR_ACEL      "/Aceleraciones"
@@ -151,7 +175,7 @@
 // ---- Simulación desde SD (solo para validación, comentar en producción) ----
 // Descomentar para reproducir un sismo real almacenado en la SD.
 // Generar el archivo con: Data_Labeling/anc_to_sim.py
-//define SIM_REPLAY_FILE   "/sim_sismo.bin"
+//#define SIM_REPLAY_FILE   "/sim_sismo.bin"
 
 // ---- Identificación de estación ----------------------------
 // Valor real proviene de .env vía load_env.py.
