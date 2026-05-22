@@ -1,7 +1,7 @@
 // ============================================================
-//  main.cpp — DataLogger / Acelerógrafo Sismológico v2.0
-//  Hardware : TTGO LILYGO T3 V1.6.1 (ESP32) + ADXL345
-//  Versión  : 2.0 — Instrumento de medición sismológica
+//  main.cpp — DataLogger / Acelerógrafo Sismológico v2.0 Lite
+//  Hardware : ESP32 D1 R32 + ADXL345 + módulo SD (VSPI)
+//  Versión  : 2.0-lite — Sin pantalla OLED, sin LoRa
 // ============================================================
 //
 //  CAMBIOS v2.0 respecto a v1.0:
@@ -97,20 +97,10 @@ static void fft128(float* data) {
 
 
 
-#include <U8g2lib.h>   // OLED — instalar "U8g2" de olikraus en Library Manager
-
 // ── Firebase & Firestore (Fase 3) ────────────────────────────────────────────
 #include <Firebase_ESP_Client.h>
 #include <addons/TokenHelper.h>
 #include <esp_task_wdt.h>
-
-// OLED SSD1306 128×64 — modo I2C sin reiniciar el bus
-// U8G2_R0 = sin rotación. El último parámetro u8x8_byte_arduino_hw_i2c
-// usa la instancia Wire global que ya inicializamos nosotros.
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C g_oled(
-    U8G2_R0,
-    /* reset= */ U8X8_PIN_NONE
-);
 
 // ============================================================
 //  REGISTROS ADXL345 (datasheet Rev. G)
@@ -1487,61 +1477,13 @@ static void setupWebServer() {
 
 
 // ============================================================
-//  OLED — Actualización de pantalla
-// ============================================================
-//  Llamar desde loop() con baja frecuencia (cada 1-2 s).
-//  La transferencia I2C del frame completo toma ~25 ms a 400 kHz
-//  (128×64 bits / 400000 bps ≈ 20 ms + overhead).
-//  Por eso se actualiza con un intervalo, no en cada muestra.
-//  El bus I2C es bloqueante pero compartido correctamente —
-//  el ADXL no pierde muestras porque la ISR del timer solo
-//  levanta el flag g_sampleDue; la lectura real ocurre en loop()
-//  después de que oled_update() haya terminado su transferencia.
-// ============================================================
-static void oled_update() {
-    g_oled.clearBuffer();
-
-    // ── Logos (arriba, lado a lado) ─────────────────────────
-    g_oled.drawXBMP(0, 0, 60, 30, logo);   // izquierda
-    g_oled.drawXBMP(65, 0, 60, 30, logo_gicm_negro);   // izquierda
-
-
-    // ── Texto central ───────────────────────────────────────
-    g_oled.setFont(u8g2_font_6x10_tf);
-
-    // Centrado aproximado
-    g_oled.drawStr(25, 40, "PANdemaiz Quake");
-
-    // ── URL ─────────────────────────────────────────────────
-    g_oled.setFont(u8g2_font_5x8_tf); // más pequeña
-    g_oled.drawStr(10, 52,  WiFi.localIP().toString().c_str());
-
-    // ── Línea separadora ────────────────────────────────────
-    g_oled.drawHLine(0, 54, 128);
-
-    // ── Estado (abajo) ─────────────────────────────────────
-    char buf[32];
-    snprintf(buf, sizeof(buf), "S:%lu D:%lu",
-             g_totalSamples, g_dropCount);
-
-    g_oled.drawStr(0, 63, buf);
-
-    // ── Indicador SD ───────────────────────────────────────
-    if (g_dataFile) {
-        g_oled.drawStr(100, 63, "SD");
-    }
-
-    g_oled.sendBuffer();
-}
-
-// ============================================================
 //  SETUP
 // ============================================================
 void setup() {
     Serial.begin(115200);
     delay(400);
     Serial.println("\n╔══════════════════════════════════════════╗");
-    Serial.println("║  DataLogger ADXL345 v2.0 — TTGO T3 V1.6.1 ║");
+    Serial.println("║  DataLogger ADXL345 v2.0-lite — D1 R32    ║");
     Serial.println("║  Instrumento Sismológico  ODR=200Hz        ║");
     Serial.println("╚══════════════════════════════════════════════╝");
 
@@ -1570,29 +1512,6 @@ void setup() {
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
     Wire.setClock(400000);
     Serial.printf("[I2C] Bus en SDA=%d SCL=%d @400kHz\n", PIN_I2C_SDA, PIN_I2C_SCL);
-
-// ── OLED — inicializar DESPUÉS de Wire.begin(), ANTES de ADXL ──
-// setI2CAddress() por si la dirección no es la default de U8g2
-g_oled.setI2CAddress(OLED_I2C_ADDR * 2); // U8g2 espera la dirección desplazada 1 bit
-g_oled.begin();
-g_oled.setFont(u8g2_font_6x10_tf);
-// Imagen 1
-g_oled.clearBuffer();
-g_oled.drawXBMP(0, 0, 100, 40, escudo); // ajusta tamaño
-g_oled.sendBuffer();
-delay(3000);
-
-// Imagen 2
-g_oled.clearBuffer();
-g_oled.drawXBMP(0, 0, 100, 40, logo_gicm); // segundo logo
-g_oled.sendBuffer();
-delay(3000);
-g_oled.clearBuffer();
-g_oled.sendBuffer();
-
-delay(2000); // 3 segundos (puedes cambiarlo)
-
-Serial.println("[OLED] ✓ Pantalla inicializada");
 
     // ── ADXL345 — init y verificación ────────────────────
     if (!adxl_init()) {
@@ -1792,20 +1711,4 @@ void loop() {
                       ax_g, ay_g, az_g,
                       g_totalSamples, g_dropCount);
     }
-// ── 6. Actualizar OLED cada 1500 ms ──────────────────────
-//
-//  Se actualiza FUERA del bloque if(!doSample) para que
-//  el refresco ocurra incluso si hubo un drop de muestra.
-//  El intervalo de 1500 ms es un compromiso entre fluidez
-//  visual y tiempo de bus ocupado:
-//    - Cada update ocupa el bus ~25 ms
-//    - A 200 Hz hay una muestra cada 5 ms
-//    - La actualización puede "robar" hasta 5 períodos de muestreo
-//    - Con 1500 ms de intervalo, el overhead es 25/1500 = 1.6%
-//
-static uint32_t lastOled = 0;
-if (millis() - lastOled > 1500) {
-    lastOled = millis();
-    oled_update();
-}
 }
