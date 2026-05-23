@@ -736,9 +736,11 @@ static void firebase_init() {
 
     Firebase.begin(&g_fbConfig, &g_fbAuth);
     Firebase.reconnectNetwork(true);
-    // RX=16384 (default Firebase_ESP_Client): certificate chain + fragmentación SSL
+    // RX=4096: los payloads RTDB son < 1 KB; el server adapta el tamaño del record TLS
+    // al máximo que el cliente anuncia. 4 KB es mucho más fácil de alojar en heap
+    // fragmentado post-auth que el default 16 KB, evitando OOM en redes con proxy SSL.
     // TX=512 es suficiente para ClientHello mbedTLS (< 300 bytes)
-    g_fbdo.setBSSLBufferSize(16384, 512);
+    g_fbdo.setBSSLBufferSize(4096, 512);
     Serial.println("[Firebase] Inicializado");
 }
 
@@ -767,6 +769,7 @@ static void firebase_alert_rtdb(const UploadReq& req) {
     j.set("ip",           ip);
     j.set("url_descarga", url);
     bool ok = Firebase.RTDB.setJSON(&g_fbdo, key, &j);
+    if (!ok) g_fbdo.stopWiFiClient();
     Serial.printf("[RTDB] Alerta %s: %s\n", key,
                   ok ? "OK" : g_fbdo.errorReason().c_str());
 }
@@ -805,6 +808,7 @@ static void rtdb_log_file(const UploadReq& req) {
     j.set("timestamp", (int)req.ts);
     if (req.is_event) j.set("score", req.score);
     bool ok = Firebase.RTDB.setJSON(&g_fbdo, key, &j);
+    if (!ok) g_fbdo.stopWiFiClient();
     Serial.printf("[RTDB] %s: %s\n", key, ok ? "OK" : g_fbdo.errorReason().c_str());
 }
 
@@ -819,6 +823,9 @@ static void upload_task(void* param) {
     }
 
     vTaskDelay(pdMS_TO_TICKS(5000));
+    Serial.printf("[Firebase] Heap libre antes de init: %u B (mayor bloque: %u B)\n",
+                  (unsigned)esp_get_free_heap_size(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
     firebase_init();
 
     while (!Firebase.ready()) {
@@ -840,6 +847,7 @@ static void upload_task(void* param) {
         time_t now_t; time(&now_t);
         j.set("timestamp", (int)now_t);
         bool ok = Firebase.RTDB.setJSON(&g_fbdo, key, &j);
+        if (!ok) g_fbdo.stopWiFiClient();
         Serial.printf("[RTDB] Estacion Conectada — IP: %s: %s\n",
                       ip, ok ? "OK" : g_fbdo.errorReason().c_str());
     }
@@ -872,6 +880,7 @@ static void upload_task(void* param) {
             time_t now_t; time(&now_t);
             j.set("timestamp", (int)now_t);
             bool ok = Firebase.RTDB.setJSON(&g_fbdo, key, &j);
+            if (!ok) g_fbdo.stopWiFiClient();
             Serial.printf("[RTDB] Status GPS actualizado (%.5f,%.5f): %s\n",
                           g_gps_lat, g_gps_lon, ok ? "OK" : g_fbdo.errorReason().c_str());
         }
