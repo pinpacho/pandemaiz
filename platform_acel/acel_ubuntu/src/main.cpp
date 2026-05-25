@@ -728,7 +728,7 @@ static void firebase_init() {
     Firebase.reconnectNetwork(true);
     // RX=16384 (default Firebase_ESP_Client): certificate chain + fragmentación SSL
     // TX=512 es suficiente para ClientHello mbedTLS (< 300 bytes)
-    g_fbdo.setBSSLBufferSize(16384, 512);
+    g_fbdo.setBSSLBufferSize(4096, 512);
     Serial.println("[Firebase] Inicializado");
 }
 
@@ -809,6 +809,9 @@ static void upload_task(void* param) {
     }
 
     vTaskDelay(pdMS_TO_TICKS(5000));
+    Serial.printf("[Firebase] Heap libre antes de init: %u B (mayor bloque: %u B)\n",
+                  (unsigned)esp_get_free_heap_size(),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
     firebase_init();
 
     while (!Firebase.ready()) {
@@ -1538,7 +1541,7 @@ void setup() {
 
     // ── SD Card ───────────────────────────────────────────
     g_sdSPI.begin(PIN_SD_SCK, PIN_SD_MISO, PIN_SD_MOSI, PIN_SD_CS);
-    if (!SD.begin(PIN_SD_CS, g_sdSPI, 20000000)) {
+    if (!SD.begin(PIN_SD_CS, g_sdSPI, 100000)) {
         Serial.println("HALT: SD Card no montada. Verifica pines.");
         for (;;) { delay(1000); }
     }

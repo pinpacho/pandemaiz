@@ -95,7 +95,14 @@
 #define PIN_I2C_SCL     22
 
 // ---- Pines MicroSD (VSPI — ESP32 D1 R32) ------------------
-24
+
+
+#define PIN_SD_SCK    18
+#define PIN_SD_MISO   19
+#define PIN_SD_MOSI   23
+#define PIN_SD_CS      5
+
+
 
 // ---- Dirección I2C del ADXL345 ----------------------------
 // SDO/ALT_ADDRESS → GND  ⟹  0x53
@@ -156,11 +163,11 @@
 #define STA_LTA_ON       2.5f    // ratio para activar trigger
 #define STA_LTA_OFF      1.5f    // ratio para desactivar trigger
 #define STA_LTA_WARMUP   6000    // 30 s de calentamiento al arrancar
-// Energía mínima del STA para que el trigger pueda activarse.
-// Equivale a ~0.7 mg RMS sostenidos durante 0.5 s.
-// Un pico de 1 LSB (3.9 mg) aislado solo eleva el STA ~1.5e-7 g² → insuficiente.
-#define STA_LTA_MIN_STA  5e-7f   // g² — guarda contra falsos positivos por cuantización
-
+// Energía mínima del STA para que el trigger pueda activarse (en LSB²).
+// g_sta se acumula en LSB² (ax_f² + ay_f² + az_f²), no en g².
+// 0.5 LSB² ≈ 0.41 mg RMS por eje × 3 ejes — bloquea bursts de ruido electrónico
+// y cuantización sin impedir la detección de sismos reales (PGA > ~2 mg).
+#define STA_LTA_MIN_STA  0.5f    // LSB² — corrige bug de unidades (antes 5e-7 g²)
 // ---- Rutas SD (logger dual) --------------------------------
 #define SD_DIR_ACEL      "/Aceleraciones"
 #define SD_DIR_EVENTOS   "/Eventos"
