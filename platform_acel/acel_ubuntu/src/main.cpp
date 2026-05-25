@@ -757,6 +757,7 @@ static void firebase_alert_rtdb(const UploadReq& req) {
     j.set("ip",           ip);
     j.set("url_descarga", url);
     bool ok = Firebase.RTDB.setJSON(&g_fbdo, key, &j);
+    if (!ok) g_fbdo.stopWiFiClient();
     Serial.printf("[RTDB] Alerta %s: %s\n", key,
                   ok ? "OK" : g_fbdo.errorReason().c_str());
 }
@@ -795,6 +796,7 @@ static void rtdb_log_file(const UploadReq& req) {
     j.set("timestamp", (int)req.ts);
     if (req.is_event) j.set("score", req.score);
     bool ok = Firebase.RTDB.setJSON(&g_fbdo, key, &j);
+    if (!ok) g_fbdo.stopWiFiClient();
     Serial.printf("[RTDB] %s: %s\n", key, ok ? "OK" : g_fbdo.errorReason().c_str());
 }
 
@@ -833,6 +835,7 @@ static void upload_task(void* param) {
         time_t now_t; time(&now_t);
         j.set("timestamp", (int)now_t);
         bool ok = Firebase.RTDB.setJSON(&g_fbdo, key, &j);
+        if (!ok) g_fbdo.stopWiFiClient();
         Serial.printf("[RTDB] Estacion Conectada — IP: %s: %s\n",
                       ip, ok ? "OK" : g_fbdo.errorReason().c_str());
     }
@@ -865,6 +868,7 @@ static void upload_task(void* param) {
             time_t now_t; time(&now_t);
             j.set("timestamp", (int)now_t);
             bool ok = Firebase.RTDB.setJSON(&g_fbdo, key, &j);
+            if (!ok) g_fbdo.stopWiFiClient();
             Serial.printf("[RTDB] Status GPS actualizado (%.5f,%.5f): %s\n",
                           g_gps_lat, g_gps_lon, ok ? "OK" : g_fbdo.errorReason().c_str());
         }
