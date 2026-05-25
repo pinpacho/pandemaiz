@@ -58,7 +58,7 @@ PANdeMaiz Quake es una red distribuida de nodos acelerométricos de bajo costo p
 | PlatformIO | CLI o extensión VS Code |
 | Docker + Compose | v24+ |
 | Firebase | Proyecto con RTDB habilitado |
-| Hardware nodo | TTGO LILYGO T3 V1.6.1, ADXL345, MicroSD |
+| Hardware nodo | ESP32, ADXL345, MicroSD |
 | SO host (backend) | Linux/macOS/Windows con Docker |
 
 ---

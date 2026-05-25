@@ -8,26 +8,24 @@ Firmware en C++ para el nodo de adquisición sísmica. Implementa la cadena comp
 
 | Componente | Modelo | Interfaz | Parámetros |
 |------------|--------|----------|------------|
-| Microcontrolador | TTGO LILYGO T3 V1.6.1 (ESP32) | — | 240 MHz dual-core, 4 MB Flash, 520 KB SRAM |
+| Microcontrolador | ESP32 (240 MHz dual-core) | — | 4 MB Flash, 520 KB SRAM |
 | Acelerómetro | ADXL345 | I2C @ 400 kHz | SDA=21, SCL=22, addr=0x53, ±2g full-res |
-| Almacenamiento | MicroSD | SPI @ 20 MHz | CS=13, MOSI=15, SCK=14, MISO=2 |
-| GPS | u-blox Neo 6M | UART2 @ 9600 bps | RX=16, TX=17, timeout 5 s |
-| Display | OLED SSD1306 128×64 | I2C (mismo bus) | addr=0x3C |
-| LoRa (reservado) | — | SPI | MOSI=27, SCK=5, CS=18, MISO=19, RST=23, DIO0=26 |
+| Almacenamiento | MicroSD | SPI (VSPI) | CS=5, MOSI=23, SCK=18, MISO=19 |
+| GPS | u-blox Neo 6M | UART @ 9600 bps | RX=4, TX=25, timeout 5 s |
 
 ### Diagrama de conexión resumido
 
 ```
 ESP32 GPIO
 ──────────────────────────────────────────────
-GPIO 21 (SDA) ──┬── ADXL345 SDA
-GPIO 22 (SCL) ──┴── ADXL345 SCL  (también SSD1306)
-GPIO 13       ──── SD CS
-GPIO 15       ──── SD MOSI
-GPIO 14       ──── SD SCK
-GPIO  2       ──── SD MISO
-GPIO 16       ──── GPS TX (Neo 6M → ESP32 RX)
-GPIO 17       ──── GPS RX (ESP32 TX → Neo 6M)
+GPIO 21 (SDA) ──── ADXL345 SDA
+GPIO 22 (SCL) ──── ADXL345 SCL
+GPIO 18       ──── SD SCK
+GPIO 19       ──── SD MISO
+GPIO 23       ──── SD MOSI
+GPIO  5       ──── SD CS
+GPIO  4       ──── GPS TX (Neo 6M → ESP32 RX)
+GPIO 25       ──── GPS RX (ESP32 TX → Neo 6M)
 ──────────────────────────────────────────────
 ```
 
