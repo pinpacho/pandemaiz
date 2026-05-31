@@ -27,6 +27,10 @@ Data_Labeling/DatosObtenidos/
 # ── Datos binarios del sensor ─────────────────────────────────
 *.bin
 
+# ── Post_Analysis — datos y salidas generadas ────────────────
+Post_Analysis/data/
+Post_Analysis/output/
+
 # ── PlatformIO ───────────────────────────────────────────────
 platform_acel/**/.pio/
 platform_acel/**/.vscode/

@@ -47,6 +47,7 @@ PANdeMaiz Quake es una red distribuida de nodos acelerométricos de bajo costo p
 | Entrenamiento ML | `ML/` | [README](ML/README.md) |
 | Backend API + Consenso | `backend/` | [README](backend/README.md) |
 | Dashboard + Conversión | `backend/static/` | [README](backend/static/README.md) |
+| **Post-análisis offline** | `Post_Analysis/` | [README](Post_Analysis/README.md) |
 
 ---
 
@@ -94,6 +95,17 @@ cp .env.example .env          # completar Firebase + canales de alerta
 docker-compose up --build     # expone http://localhost:8000
 ```
 
+### 4 — Post-análisis offline
+
+```bash
+source pan_env/bin/activate
+cp /ruta/a/mis/archivos/*.bin Post_Analysis/data/aceleraciones/
+cp /ruta/a/eventos/*.bin      Post_Analysis/data/eventos/
+jupyter lab                   # abrir Post_Analysis/post_analysis.ipynb → Run All
+```
+
+Los archivos convertidos (`.mseed`, `.anc`) y las figuras (`.png`) se guardan en `Post_Analysis/output/`.
+
 ---
 
 ## Estructura del repositorio
@@ -131,6 +143,12 @@ PANdeMaiz/
 │   ├── docker-compose.yml
 │   ├── Dockerfile
 │   └── .env.example
+├── Post_Analysis/
+│   ├── post_analysis.ipynb           # Análisis offline de archivos .bin
+│   ├── data/                         # .bin de entrada (gitignored)
+│   │   ├── aceleraciones/
+│   │   └── eventos/
+│   └── output/                       # mseed/, anc/, plots/ (gitignored)
 ├── requirements.txt              # Entorno Python (datos + ML)
 └── README.md
 ```
