@@ -800,6 +800,8 @@ static void rtdb_log_file(const UploadReq& req) {
     Serial.printf("[RTDB] %s: %s\n", key, ok ? "OK" : g_fbdo.errorReason().c_str());
 }
 
+static void connectWiFi();  // forward declaration — definida más abajo
+
 // Task en Core 0: RTDB para alertas + metadatos de archivos.
 // Core 1 sigue muestreando a 200 Hz sin interferencia.
 static void upload_task(void* param) {
@@ -843,7 +845,48 @@ static void upload_task(void* param) {
     UploadReq req;
     uint32_t fb_retry_ms = 1000;
     uint32_t lastStatusMs = 0;
+
+    // Watchdog state (estáticas dentro del task — no necesitan ser globales)
+    static uint32_t s_wdog_ms      = 0;  // última comprobación
+    static uint32_t s_disco_ms     = 0;  // instante de primera desconexión
+    static uint32_t s_reconnect_ms = 0;  // último intento de reconexión
+
     for (;;) {
+        // ── Watchdog WiFi/Firebase (Core 0, no bloquea Core 1) ──────────────
+        // Comprueba estado cada 30 s. Si WiFi está caído más de 5 min,
+        // ejecuta reconexión EAP completa (necesaria en WPA2-Enterprise).
+        {
+            const uint32_t WDOG_CHECK_MS  = 30000UL;
+            const uint32_t WDOG_RETRY_MS  = 300000UL;
+            uint32_t now_ms = (uint32_t)millis();
+            if (now_ms - s_wdog_ms >= WDOG_CHECK_MS) {
+                s_wdog_ms = now_ms;
+                if (WiFi.status() != WL_CONNECTED) {
+                    if (s_disco_ms == 0) {
+                        s_disco_ms = now_ms;
+                        Serial.println("[WDOG] WiFi caido — reintento en 5 min");
+                    }
+                    if (now_ms - s_reconnect_ms >= WDOG_RETRY_MS) {
+                        s_reconnect_ms = now_ms;
+                        Serial.printf("[WDOG] Reconectando (offline %lu s)...\n",
+                                      (now_ms - s_disco_ms) / 1000UL);
+                        connectWiFi();
+                        if (WiFi.status() == WL_CONNECTED) {
+                            Serial.println("[WDOG] WiFi restaurado — re-autenticando Firebase");
+                            s_disco_ms = 0;
+                            Firebase.begin(&g_fbConfig, &g_fbAuth);
+                        }
+                    }
+                } else {
+                    if (s_disco_ms != 0) {
+                        Serial.printf("[WDOG] Reconexion exitosa tras %lu s\n",
+                                      (now_ms - s_disco_ms) / 1000UL);
+                        s_disco_ms = 0;
+                    }
+                }
+            }
+        }
+
         if (!Firebase.ready()) {
             vTaskDelay(pdMS_TO_TICKS(fb_retry_ms));
             fb_retry_ms *= 2;
@@ -1036,6 +1079,18 @@ static void writeSample(const Sample &s) {
 //  WIFI — Personal (WPA2) o Enterprise (PEAP/MSCHAPv2)
 //  Auto-detección: si WIFI_IDENTITY y WIFI_USERNAME no vacíos → Enterprise
 // ============================================================
+static void onWiFiEvent(WiFiEvent_t event) {
+    switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+        Serial.println("[WiFi] Desconectado del AP");
+        break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+        Serial.printf("[WiFi] IP obtenida: %s\n", WiFi.localIP().toString().c_str());
+        break;
+    default: break;
+    }
+}
+
 static void connectWiFi() {
     WiFi.disconnect(true);
     delay(200);
@@ -1561,6 +1616,7 @@ void setup() {
     seismic_inference_init();
 
     // ── WiFi y NTP ────────────────────────────────────────
+    WiFi.onEvent(onWiFiEvent);
     connectWiFi();
     
     // ── GPS Neo 6M (5 s timeout → 0.0, 0.0 si sin fix) ──
