@@ -8,7 +8,8 @@ y `mapa_sismo.ipynb`).
 - Ventanas de tiempo, conversión de unidades y piezas comunes de las gráficas en formato SGC.
 
 Convenciones: los datos van en columnas [EW, NS, VER] (`LABELS`), las filas de las gráficas en Z, N, E
-(`ORDEN_FILAS`) y los tiempos en datetime64[us] UTC. La hora de cada .bin es la hora local de su nombre.
+(`ORDEN_FILAS`) y los tiempos en datetime64[us] UTC. Las muestras de los .bin se ubican con su reloj
+millis() (`timestamp_ms`) anclado a la hora local del nombre de los archivos (ver `reconstruct_full_hour`).
 
 Si se edita este archivo con un notebook abierto, hay que reiniciar el kernel para que lo vuelva a importar.
 """
@@ -175,7 +176,23 @@ def parse_bin(path):
     Lee un archivo .bin del ESP32 (formato PANdeMaiz Quake).
 
     Retorna header {version, sample_rate, lat, lon} y data (N, 4) float32 [t_s, ax_g, ay_g, az_g].
+    Ojo: en float32 t_s pierde resolución (≈0.1 s con el reloj en ~10⁶ s); para ubicar muestras en el
+    tiempo usar `_muestras_bin()`.
     """
+    header, m = _leer_bin(path)
+    data = np.column_stack([m["t_ms"] / 1000.0, m["ax"] * SCALE_G, m["ay"] * SCALE_G, m["az"] * SCALE_G])
+    return header, data.astype(np.float32)
+
+
+def _muestras_bin(path):
+    """(t_s float64 con resolución de ms, aceleraciones (N, 3) float64 en g [EW, NS, VER]) de un .bin."""
+    _, m = _leer_bin(path)
+    return (m["t_ms"].astype(np.float64) / 1000.0,
+            np.column_stack([m["ax"], m["ay"], m["az"]]).astype(np.float64) * SCALE_G)
+
+
+def _leer_bin(path):
+    """Cabecera y arreglo estructurado de muestras (t_ms, ax, ay, az) de un .bin, sin conversiones."""
     raw = pathlib.Path(path).read_bytes()
     if len(raw) < _HEADER_V2:
         raise ValueError(f"{path}: archivo demasiado corto ({len(raw)} bytes)")
@@ -195,9 +212,7 @@ def parse_bin(path):
     n_samples = (len(raw) - hdr_size) // _SAMPLE_SIZE
     if n_samples == 0:
         raise ValueError(f"{path}: no contiene muestras")
-    m = np.frombuffer(raw, dtype=_DTYPE_MUESTRA, count=n_samples, offset=hdr_size)
-    data = np.column_stack([m["t_ms"] / 1000.0, m["ax"] * SCALE_G, m["ay"] * SCALE_G, m["az"] * SCALE_G])
-    return header, data.astype(np.float32)
+    return header, np.frombuffer(raw, dtype=_DTYPE_MUESTRA, count=n_samples, offset=hdr_size)
 
 
 def discover_bins(folder):
@@ -213,15 +228,81 @@ def extraer_score(stem):
     return m.group(1) if m else "?"
 
 
+MICROPAUSA_S = 0.5   # huecos más cortos que esto: pausas breves del lazo del nodo (pantalla OLED, SD)
+
+
+def _anclar_reloj(nombres_rel, t_s):
+    """
+    Ancla el reloj millis() del nodo a la hora de los nombres de archivo.
+
+    `nombres_rel[k]`: hora del nombre del archivo k en segundos desde una referencia; `t_s[k]`: marcas
+    timestamp_ms/1000 de sus muestras. Los archivos van ordenados por hora.
+
+    El firmware nombra cada archivo con la hora (truncada al segundo) en que lo abre y toma la primera
+    muestra después, así que para cada archivo la hora real de una muestra t cumple
+    hora >= nombre - t[0] + t. El ancla de un arranque del nodo es la cota inferior más ajustada de todos
+    sus archivos (error típico < 0.5 s). Un reinicio (millis vuelve a empezar) o un salto de reloj de más
+    de 5 s abre un tramo nuevo con su propia ancla.
+
+    Retorna el ancla de cada archivo (segundos): hora = ancla + t.
+    """
+    tramos = [[0]]
+    for k in range(1, len(t_s)):
+        reinicio = t_s[k][0] < t_s[k - 1][-1]
+        salto = abs((nombres_rel[k] - nombres_rel[k - 1]) - (t_s[k][0] - t_s[k - 1][0])) > 5.0
+        if reinicio or salto:
+            tramos.append([k])
+        else:
+            tramos[-1].append(k)
+    anclas = [0.0] * len(t_s)
+    for tramo in tramos:
+        ancla = max(nombres_rel[k] - float(t_s[k][0]) for k in tramo)
+        for k in tramo:
+            anclas[k] = ancla
+    return anclas
+
+
+def _indices_grilla(rel, rel0, fs):
+    """
+    Índice en la grilla de `fs` Hz de cada muestra, con hora real `rel` (s) y origen de la grilla `rel0`.
+
+    El temporizador del nodo marca exactamente 1/fs, pero millis() registra la lectura con ~1 ms de jitter;
+    redondear cada marca por separado haría chocar muestras vecinas. Dentro de un tramo sin pausas (paso
+    < 1.5/fs) las muestras se ponen consecutivas, y al comienzo de cada tramo se usa la hora real
+    redondeada (sin chocar con el tramo anterior), así que no se pierde ninguna muestra ni se acumula deriva.
+    """
+    inicio = np.concatenate([[True], np.diff(rel) >= 1.5 / fs])
+    primeros = np.flatnonzero(inicio)
+    ancla = np.rint((rel[primeros] - rel0) * fs).astype(np.int64)
+    largos = np.diff(np.append(primeros, len(rel)))
+    for j in range(1, len(primeros)):                        # sin choques entre tramos
+        ancla[j] = max(ancla[j], ancla[j - 1] + largos[j - 1])
+    tramo = np.cumsum(inicio) - 1
+    return ancla[tramo] + (np.arange(len(rel)) - primeros[tramo])
+
+
 def reconstruct_full_hour(accel_paths, evento_paths, fs=FS, baseline_s=BASELINE_S, tz_offset_horas=TZ_OFFSET_HORAS):
     """
-    Reconstruye una señal continua a `fs` Hz en UTC con la grabación continua (prioridad), rellena los
-    huecos con los eventos que caen en ellos y el resto por interpolación lineal. La hora de cada archivo es
-    la de su nombre, en hora local UTC`tz_offset_horas`.
+    Reconstruye la señal continua del Acelerógrafo UdeA en una grilla UTC a `fs` Hz.
+
+    1. Cada muestra de la grabación continua se ubica en su hora real: el reloj millis() de sus
+       `timestamp_ms`, anclado a la hora de los nombres de archivo (`_anclar_reloj`). La hora del nombre es
+       hora local UTC`tz_offset_horas`. No se supone que un archivo de 12 000 muestras dure 60 s: el nodo
+       deja de muestrear durante sus pausas (clasificación de una alerta, refresco de la pantalla, SD) y esas
+       pausas quedan como huecos en su lugar real.
+    2. Los .bin de eventos NO rellenan huecos. Cada uno contiene la ventana de 4 s que clasificó la red,
+       es decir, las muestras que la grabación continua ya tiene justo ANTES de la pausa de clasificación,
+       y sus marcas temporales las reconstruye el firmware al escribirlos (después de clasificar). Se usan
+       para ubicar la alerta: su ventana es la de las `len(evento)` muestras continuas que terminan
+       inmediatamente antes de la hora de escritura del evento.
+    3. Los huecos se rellenan por interpolación lineal. Los de `MICROPAUSA_S` o más se marcan como
+       interpolados (status 3); los más cortos, como micropausas (status 4), para no saturar las gráficas.
+    4. Se quita la línea base (media de los primeros `baseline_s` segundos).
 
     Retorna dict: t_utc (datetime64[us]), data_g (N, 3) [EW, NS, VER] en g sin línea base,
-    status (0=vacío 1=continuo 2=evento 3=interpolado), alert_windows [(inicio_utc, fin_utc, score)]
-    ordenadas por hora, resumen (segundos de huecos, rellenados e interpolados) y tz_offset_horas.
+    status (1=continuo 3=interpolado 4=micropausa interpolada; 2 ya no se usa), alert_windows
+    [(inicio_utc, fin_utc, score)] con la ventana realmente clasificada, ordenadas por hora, resumen y
+    tz_offset_horas.
     """
     if not accel_paths:
         raise ValueError("reconstruct_full_hour: no hay archivos de aceleraciones")
@@ -233,53 +314,71 @@ def reconstruct_full_hour(accel_paths, evento_paths, fs=FS, baseline_s=BASELINE_
         if t_local is None:
             warnings.warn(f"{p.name}: el nombre no tiene fecha/hora YYYYMMDD_HHMMSS, se omite.")
             continue
-        _, data = parse_bin(p)
-        accel_info.append((local_to_utc(t_local, tz_offset_horas), len(data), data))
+        accel_info.append((local_to_utc(t_local, tz_offset_horas), *_muestras_bin(p)))
     if not accel_info:
         raise ValueError("reconstruct_full_hour: ningún archivo de aceleraciones pudo procesarse")
-
     accel_info.sort(key=lambda x: x[0])
-    t_inicio = accel_info[0][0]
-    t_fin    = max(t0 + timedelta(seconds=n / fs) for t0, n, _ in accel_info)
-    n_total  = int(round((t_fin - t_inicio).total_seconds() / dt)) + 1
+
+    # 1) hora real de cada muestra, en segundos desde `ref`
+    ref = accel_info[0][0]
+    nombres_rel = [(nombre - ref).total_seconds() for nombre, _, _ in accel_info]
+    t_s = [t for _, t, _ in accel_info]
+    anclas = _anclar_reloj(nombres_rel, t_s)
+    rel = [a + t for a, t in zip(anclas, t_s)]
+
+    rel0 = min(float(r[0]) for r in rel)
+    t_inicio = ref + timedelta(seconds=rel0)
+    idx_por_archivo = [_indices_grilla(r, rel0, fs) for r in rel]
+    n_total = int(max(int(i[-1]) for i in idx_por_archivo)) + 1
 
     data_g = np.full((n_total, 3), np.nan, dtype=np.float64)
     status = np.zeros(n_total, dtype=np.int8)
-
-    def _volcar(t0_utc, arr_n4, codigo, permitir_sobrescribir):
-        offset = int(round((t0_utc - t_inicio).total_seconds() / dt))
-        idx = np.arange(offset, offset + len(arr_n4))
-        valido = (idx >= 0) & (idx < n_total)
-        idx, vals = idx[valido], arr_n4[valido][:, 1:4]      # ax, ay, az -> EW, NS, VER
-        if not permitir_sobrescribir:
-            libres = status[idx] == 0
-            idx, vals = idx[libres], vals[libres]
-        data_g[idx] = vals
-        status[idx] = codigo
-
-    for t0_utc, _, data in accel_info:                       # 1) grabación continua
-        _volcar(t0_utc, data, codigo=1, permitir_sobrescribir=True)
+    for idx, (_, _, acel) in zip(idx_por_archivo, accel_info):
+        data_g[idx] = acel                                    # ax, ay, az -> EW, NS, VER
+        status[idx] = 1
     seg_huecos = float(np.sum(status == 0)) * dt
 
-    alert_windows = []                                       # 2) eventos donde haya hueco
+    # 2) alertas: ventana continua que termina justo antes de la escritura de cada evento
+    alert_windows = []
     for p in evento_paths:
         t_local = get_starttime_local(p.stem)
         if t_local is None:
             continue
-        t0_utc = local_to_utc(t_local, tz_offset_horas)
-        _, data = parse_bin(p)
-        alert_windows.append((t0_utc, t0_utc + timedelta(seconds=len(data) / fs), extraer_score(p.stem)))
-        _volcar(t0_utc, data, codigo=2, permitir_sobrescribir=False)
+        nombre_ev = local_to_utc(t_local, tz_offset_horas)
+        t_ev, _ = _muestras_bin(p)
+        n_ev = len(t_ev)
+        escritura = float(t_ev[0]) + n_ev * dt                # millis (s) al escribir la muestra 0
+        nombre_ev_rel = (nombre_ev - ref).total_seconds()
+        k = min(range(len(rel)), key=lambda j: abs(anclas[j] + escritura - nombre_ev_rel))
+        mismo_tramo = [j for j in range(len(rel)) if anclas[j] == anclas[k]]
+        t_tramo = np.concatenate([t_s[j] for j in mismo_tramo])
+        rel_tramo = np.concatenate([rel[j] for j in mismo_tramo])
+        previas = np.flatnonzero(t_tramo < escritura)
+        if (abs(anclas[k] + escritura - nombre_ev_rel) < 10.0 and len(previas)
+                and escritura - t_tramo[previas[-1]] < 30.0):
+            fin_rel = float(rel_tramo[previas[-1]])
+            ini_rel = float(rel_tramo[previas[max(len(previas) - n_ev, 0)]])
+            a0, a1 = ref + timedelta(seconds=ini_rel), ref + timedelta(seconds=fin_rel)
+        else:
+            warnings.warn(f"{p.name}: no se encontró su ventana en la grabación continua; "
+                          f"se marca la alerta en la hora del nombre.")
+            a0, a1 = nombre_ev, nombre_ev + timedelta(seconds=n_ev * dt)
+        alert_windows.append((a0, a1, extraer_score(p.stem)))
     alert_windows.sort(key=lambda a: a[0])
 
-    huecos = status == 0                                     # 3) interpolación lineal del resto
-    seg_eventos = seg_huecos - float(np.sum(huecos)) * dt
+    # 3) interpolación lineal de los huecos; los cortos se marcan aparte como micropausas
+    huecos = status == 0
     idx_todos = np.arange(n_total)
     for c in range(3):
         vacio = np.isnan(data_g[:, c])
         if vacio.any() and (~vacio).sum() >= 2:
             data_g[vacio, c] = np.interp(idx_todos[vacio], idx_todos[~vacio], data_g[~vacio, c])
-    status[huecos] = 3
+    d = np.diff(np.concatenate([[0], huecos.astype(np.int8), [0]]))
+    n_largos = 0
+    for i0, i1 in zip(np.flatnonzero(d == 1), np.flatnonzero(d == -1)):
+        largo = (i1 - i0) * dt >= MICROPAUSA_S
+        status[i0:i1] = 3 if largo else 4
+        n_largos += int(largo)
 
     n_base = min(int(baseline_s * fs), n_total)              # 4) línea base: media del tramo inicial
     data_g = data_g - np.nanmean(data_g[:n_base], axis=0)
@@ -292,23 +391,27 @@ def reconstruct_full_hour(accel_paths, evento_paths, fs=FS, baseline_s=BASELINE_
         "resumen": {
             "segundos_totales": n_total * dt,
             "segundos_hueco_original": seg_huecos,
-            "segundos_rellenados_evento": seg_eventos,
-            "segundos_interpolados": float(np.sum(huecos)) * dt,
+            "segundos_rellenados_evento": 0.0,               # se conserva la clave; los eventos ya no rellenan
+            "segundos_interpolados": float(np.sum(status == 3)) * dt,
+            "segundos_micropausas": float(np.sum(status == 4)) * dt,
+            "huecos_largos": n_largos,
         },
         "tz_offset_horas": tz_offset_horas,
     }
 
 
 def imprimir_reconstruccion(recon, n_aceleraciones, n_eventos):
-    """Resumen de reconstruct_full_hour(): tramo reconstruido, huecos rellenados y alertas (UTC y hora local)."""
+    """Resumen de reconstruct_full_hour(): tramo reconstruido, huecos y alertas (UTC y hora local)."""
     r = recon["resumen"]
     local = timedelta(hours=recon["tz_offset_horas"])
     print(f"Archivos: {n_aceleraciones} de aceleraciones, {n_eventos} de eventos")
     print(f"Señal reconstruida: {recon['t_utc'][0]} -> {recon['t_utc'][-1]} UTC  ({r['segundos_totales']:.1f} s)")
-    print(f"  hueco original (sin datos)  : {r['segundos_hueco_original']:.2f} s")
-    print(f"  rellenado con eventos       : {r['segundos_rellenados_evento']:.2f} s")
-    print(f"  rellenado por interpolación : {r['segundos_interpolados']:.2f} s")
-    print(f"Alertas detectadas: {len(recon['alert_windows'])}")
+    print(f"  hueco original (sin datos)        : {r['segundos_hueco_original']:.2f} s "
+          f"({100 * r['segundos_hueco_original'] / r['segundos_totales']:.1f} %)")
+    print(f"  interpolado, huecos >= {MICROPAUSA_S:g} s      : {r['segundos_interpolados']:.2f} s "
+          f"en {r['huecos_largos']} hueco(s)")
+    print(f"  interpolado, micropausas < {MICROPAUSA_S:g} s  : {r['segundos_micropausas']:.2f} s")
+    print(f"Alertas detectadas: {len(recon['alert_windows'])} (ventana de 4 s realmente clasificada)")
     for a0, a1, score in recon["alert_windows"]:
         print(f"  {a0:%Y-%m-%d %H:%M:%S} UTC  ({(a0 + local):%H:%M:%S} local)  ->  {a1:%H:%M:%S} UTC   score s{score}")
 

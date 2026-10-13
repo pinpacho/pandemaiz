@@ -111,7 +111,7 @@ El firmware del ESP32 genera archivos con este patrón por defecto.
 
 | Campo | Tipo | Bytes | Escala |
 |---|---|---|---|
-| timestamp_ms | uint32 LE | 4 | ms desde inicio de grabación |
+| timestamp_ms | uint32 LE | 4 | reloj `millis()` del nodo (ms desde su arranque) al leer la muestra |
 | ax | int16 LE | 2 | 1 LSB = 3.9 mg (EW) |
 | ay | int16 LE | 2 | 1 LSB = 3.9 mg (NS) |
 | az | int16 LE | 2 | 1 LSB = 3.9 mg (VER) |
@@ -215,9 +215,17 @@ output/<sismo>/      lo generan los notebooks (no poner nada aquí)
 | `aceleraciones/` | `accel_YYYYMMDD_HHMMSS.bin` | grabación continua, un archivo por minuto (60 s a 200 Hz) |
 | `eventos/` | `evento_YYYYMMDD_HHMMSS_sNN.bin` | los 4 s que guarda el nodo cuando el detector dispara una alerta; `sNN` es el puntaje × 100 |
 
-- Copiar los archivos **tal como salen de la tarjeta SD, sin renombrarlos**. La fecha y hora del nombre, en **hora local de Colombia (UTC−5)**, es la hora que se usa para cada archivo.
+- Copiar los archivos **tal como salen de la tarjeta SD, sin renombrarlos**. La fecha y hora del nombre, en **hora local de Colombia (UTC−5)**, sirve para anclar el reloj del nodo; cada muestra se ubica después con su propio `timestamp_ms` (ver *Reconstrucción de la señal*).
 - Copiar al menos los minutos que cubren el sismo, con margen antes y después: la línea base se calcula con los primeros `BASELINE_S` segundos (20 s), que deben ser tranquilos.
-- Mientras el nodo guarda un evento deja de grabar la señal continua. La reconstrucción rellena esos huecos con los eventos que caen en ellos y el resto por interpolación lineal, e informa cuántos segundos quedaron interpolados.
+- Mientras el nodo clasifica una alerta (≈6 s) deja de muestrear, y también hace pausas breves (≈35 ms cada 1.5 s por la pantalla OLED, más las de la SD). Esos huecos quedan en su hora real y se rellenan por interpolación lineal; la reconstrucción informa cuántos segundos quedaron interpolados.
+
+#### Reconstrucción de la señal
+
+`reconstruct_full_hour()` (en `sismo_utils.py`):
+
+1. **Hora de cada muestra.** Un archivo de 12 000 muestras **no dura 60 s**: en el Chocó abarcaban unos 61.1 s, y el del minuto del sismo, 85 s, por las pausas del nodo. Por eso las muestras no se ponen a 1/200 s una de otra desde la hora del nombre, sino según su `timestamp_ms`. El reloj `millis()` se ancla a la hora de los nombres con la cota inferior más ajustada de todos los archivos de un mismo arranque del nodo (error típico < 0.5 s). Si el nodo se reinicia, se abre un tramo con su propia ancla.
+2. **Eventos.** Un `evento_*.bin` **no rellena huecos**: contiene las 800 muestras (4 s) que la red clasificó, que son las que la grabación continua ya tiene justo **antes** de la pausa de clasificación, y sus marcas de tiempo las reconstruye el firmware al escribirlo, después de clasificar. Se usa para ubicar la alerta: su franja es la de esas 800 muestras continuas. El nombre del evento es la hora de guardado, unos 6 s después del fin de la ventana.
+3. **Huecos.** Se interpolan linealmente. Los de 0.5 s o más quedan con `status == 3` (tramo interpolado, marcado en las gráficas) y los más cortos con `status == 4` (micropausa, sin marca, para no saturar las gráficas). `status == 2` ya no se usa.
 - Si el detector no disparó ninguna alerta, `eventos/` puede quedar vacía.
 - El formato binario está descrito arriba, en *Formato `.bin` del ESP32*.
 
@@ -275,7 +283,7 @@ ESTACIONES_SGC = [
 
 #### Hora local y hora UTC
 
-Los `.bin` del Acelerógrafo UdeA tienen hora local de Colombia en el nombre y el SGC trabaja en UTC. Internamente todo se pasa a UTC con `TZ_OFFSET_HORAS = -5`. En el Chocó se comprobó así: al pasar la hora local a UTC, las alertas del detector caen justo en la llegada de las ondas P y S calculada con la distancia epicentral. Las figuras con eje de tiempo se guardan en las dos zonas de `ZONAS` (`_UTC` y `_LOCAL`).
+Los `.bin` del Acelerógrafo UdeA tienen hora local de Colombia en el nombre y el SGC trabaja en UTC. Internamente todo se pasa a UTC con `TZ_OFFSET_HORAS = -5`. En el Chocó se comprobó con la reconstrucción corregida: el valor eficaz horizontal supera de forma sostenida 3 veces el fondo previo hacia las 07:34:45 local en Pereira y Riosucio (~130 km), a las 07:34:53 en el Acelerógrafo UdeA (193 km) y a las 07:35:02 en Dabeiba (248 km), el mismo orden que las distancias. (Una comprobación anterior, que situaba las alertas justo en la llegada de las ondas P y S, se hizo con la reconstrucción que suponía 60 s por archivo y marcaba cada alerta en la hora de guardado; no es válida.) Las figuras con eje de tiempo se guardan en las dos zonas de `ZONAS` (`_UTC` y `_LOCAL`).
 
 #### Ventanas de tiempo
 
@@ -306,7 +314,7 @@ Cada plantilla tiene su propia lista, así que pueden analizar ventanas distinta
 
 #### Qué hace
 
-1. **Reconstruye la señal del Acelerógrafo UdeA**: une los `.bin` de grabación continua por la hora de su nombre en una grilla UTC a 200 Hz, rellena los huecos con los `.bin` de eventos y el resto por interpolación lineal, quita la línea base y marca las alertas del detector.
+1. **Reconstruye la señal del Acelerógrafo UdeA**: ubica cada muestra de la grabación continua en su hora real en una grilla UTC a 200 Hz, interpola los huecos, quita la línea base y marca como alerta la ventana de 4 s que clasificó el detector (ver *Reconstrucción de la señal*).
 2. **Carga cada estación del SGC con la mejor fuente disponible** y toma del `.anc` el origen, la magnitud y el lugar del sismo para los títulos.
 3. **Gráficas en formato SGC** (900×900 px, filas Z/N/E, código `Red.Estación.Loc.Canal`, misma escala en los 3 ejes, PGA de cada traza, franjas ámbar "Alerta Detectada"):
    - el Acelerógrafo UdeA solo, sobre la hora completa y recortado a cada ventana;
@@ -362,7 +370,7 @@ Con la configuración del Chocó (2 ventanas, 3 estaciones, 92 PNG y 44 GIF) tar
 - **Banda útil**: el tramo continuo de frecuencias alrededor del pico donde la señal es al menos `FOURIER["snr_min"]` veces el ruido (3 por defecto). Fuera de esa banda el espectro es ruido.
 - **Ruido**: se toma del propio registro de cada instrumento, `RUIDO["duracion_s"]` segundos que terminan `RUIDO["fin_antes_origen_s"]` segundos antes del origen (antes de la primera alerta si no se conoce el origen). Como la amplitud de Fourier de un ruido crece como √T, se multiplica por √(T_señal / T_ruido) antes de compararlo con la señal.
 - **Filtro del Acelerógrafo UdeA**: los `.bin` continuos pasan por un pasa-altos de 0.1 Hz y un pasa-bajos de 20 Hz. Por encima de 20 Hz queda sobre todo el ruido de cuantización del ADXL345, y esa zona va sombreada en las gráficas de Fourier. Los `.bin` de eventos solo tienen el pasa-altos, porque la CNN se entrenó así; por eso la vista CNN va de 0 a 100 Hz.
-- **Tramos interpolados**: una recta no tiene energía en alta frecuencia, así que en el espectrograma se ven como franjas verticales oscuras. Van marcados con una barra gris y el resumen da el porcentaje interpolado de cada ventana.
+- **Tramos interpolados**: una recta no tiene energía en alta frecuencia, así que en el espectrograma se ven como franjas verticales oscuras. Los huecos de 0.5 s o más (las pausas de clasificación, de unos 6 s) van marcados con una barra gris y el resumen da el porcentaje interpolado de cada ventana; las micropausas de la pantalla y la SD se interpolan sin marcar.
 - **Resolución del espectrograma**: la da la ventana deslizante. Con `ventana_s = 5.12` la resolución es de ≈0.2 Hz y cada columna promedia 5 s; una ventana más corta da más detalle en el tiempo y menos en frecuencia.
 
 #### Claves propias de la configuración (11–15)
